@@ -9,6 +9,7 @@ const keyboardSemitoneEntries: ReadonlyArray<KeyboardBinding> = [
   { code: 'KeyX', label: 'X', basePitch: 38 },
   { code: 'KeyC', label: 'C', basePitch: 40 },
   { code: 'KeyV', label: 'V', basePitch: 41 },
+  { code: 'KeyR', label: 'R', basePitch: 42 },
   { code: 'KeyB', label: 'B', basePitch: 43 },
   { code: 'KeyN', label: 'N', basePitch: 45 },
   { code: 'KeyM', label: 'M', basePitch: 47 },
@@ -30,7 +31,7 @@ const keyboardSemitoneEntries: ReadonlyArray<KeyboardBinding> = [
   { code: 'KeyP', label: 'P', basePitch: 63 },
   { code: 'Semicolon', label: ';', basePitch: 64 },
   { code: 'Quote', label: "'", basePitch: 65 },
-  { code: 'BracketLeft', label: '[', basePitch: 66 },
+  { code: 'BracketRight', label: ']', basePitch: 66 },
   { code: 'Backslash', label: '\\', basePitch: 67 },
 ]
 
@@ -54,8 +55,25 @@ export const clampKeyboardOctaveLevel = (octaveLevel: number) =>
   )
 
 export const keyboardOctaveLevelForCode = (code: string) => {
-  if (/^Digit[1-5]$/.test(code)) {
-    return Number(code.at(-1))
+  if (!/^Digit\d$/.test(code)) {
+    return undefined
+  }
+
+  const level = Number(code.at(-1))
+
+  return level >= KEYBOARD_OCTAVE_MIN_LEVEL &&
+    level <= KEYBOARD_OCTAVE_MAX_LEVEL
+    ? level
+    : undefined
+}
+
+export const keyboardOctaveStepForCode = (code: string) => {
+  if (code === 'Equal' || code === 'NumpadAdd') {
+    return 1
+  }
+
+  if (code === 'Minus' || code === 'NumpadSubtract') {
+    return -1
   }
 
   return undefined

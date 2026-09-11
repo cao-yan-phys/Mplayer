@@ -10,7 +10,7 @@ import { KeyboardIndex } from './KeyboardIndex'
 interface CanvasViewProps {
   midi: ParsedMidi | null
   currentTime: number
-  isPlaying: boolean
+  isAnimating: boolean
   isOverview: boolean
   getCurrentTime: () => number
   visibleTracks: ReadonlySet<number>
@@ -24,7 +24,7 @@ interface CanvasViewProps {
   highlightedPitches: ReadonlySet<number>
   keyboardOctaveLevel: number
   pressedKeyboardCodes: ReadonlySet<string>
-  keyboardEnabled: boolean
+  keyboardIndexVisible: boolean
   keyName: string | null
 }
 
@@ -56,7 +56,7 @@ const clamp = (value: number, min: number, max: number) =>
 export function CanvasView({
   midi,
   currentTime,
-  isPlaying,
+  isAnimating,
   isOverview,
   getCurrentTime,
   visibleTracks,
@@ -70,7 +70,7 @@ export function CanvasView({
   highlightedPitches,
   keyboardOctaveLevel,
   pressedKeyboardCodes,
-  keyboardEnabled,
+  keyboardIndexVisible,
   keyName,
 }: CanvasViewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -81,6 +81,7 @@ export function CanvasView({
   const [railSize, setRailSize] = useState<RailSize>(emptyRailSize)
   const [clefFontReady, setClefFontReady] = useState(false)
   const hasStartedOverviewRef = useRef(false)
+  const stationaryTime = isAnimating ? null : currentTime
 
   useEffect(() => {
     const frame = frameRef.current
@@ -298,7 +299,7 @@ export function CanvasView({
 
     if (isOverview) {
       if (hasStartedOverviewRef.current) {
-        draw(currentTime, 1)
+        draw(stationaryTime ?? 0, 1)
         return
       }
 
@@ -311,7 +312,7 @@ export function CanvasView({
           1,
         )
 
-        draw(currentTime, progress)
+        draw(stationaryTime ?? 0, progress)
 
         if (progress < 1) {
           frameId = window.requestAnimationFrame(animateOverview)
@@ -326,8 +327,8 @@ export function CanvasView({
 
     hasStartedOverviewRef.current = false
 
-    if (!isPlaying) {
-      draw(currentTime)
+    if (!isAnimating) {
+      draw(stationaryTime ?? 0)
       return
     }
 
@@ -341,10 +342,9 @@ export function CanvasView({
       window.cancelAnimationFrame(frameId)
     }
   }, [
-    currentTime,
     getCurrentTime,
     isOverview,
-    isPlaying,
+    isAnimating,
     midi,
     motifGroups,
     motifTraceEnabled,
@@ -358,6 +358,7 @@ export function CanvasView({
     size.width,
     visibleTracks,
     keyName,
+    stationaryTime,
   ])
 
   return (
@@ -365,7 +366,7 @@ export function CanvasView({
       <aside className="clef-rail" ref={railRef} aria-hidden="true">
         <canvas ref={clefCanvasRef} />
       </aside>
-      {keyboardEnabled ? (
+      {keyboardIndexVisible ? (
         <KeyboardIndex
           octaveLevel={keyboardOctaveLevel}
           pressedCodes={pressedKeyboardCodes}

@@ -1,5 +1,5 @@
 import type { MotifGroup } from '../midi/motifAnalysis'
-import type { ParsedMidi } from '../midi/noteTypes'
+import type { ParsedMidi, PitchRange } from '../midi/noteTypes'
 import type { SymmetryGroups } from '../midi/symmetryAnalysis'
 import { getInkCoordinates, renderInkFlow } from './inkRenderer'
 import { renderMotifTrace } from './motifRenderer'
@@ -23,6 +23,7 @@ interface DrawFrameOptions {
   showChromaticLines?: boolean
   showStaffLines?: boolean
   highlightedPitches?: ReadonlySet<number>
+  keyboardRange?: PitchRange
   keyName?: string | null
   showEmptyState?: boolean
 }
@@ -115,6 +116,7 @@ export const drawVisualizationFrame = ({
   showChromaticLines = true,
   showStaffLines = true,
   highlightedPitches = new Set<number>(),
+  keyboardRange,
   keyName = null,
   showEmptyState = false,
 }: DrawFrameOptions) => {
@@ -142,6 +144,7 @@ export const drawVisualizationFrame = ({
     duration: midi.duration,
     currentTime,
     overviewProgress,
+    keyboardRange,
     visibleTracks,
   }
 
@@ -152,6 +155,7 @@ export const drawVisualizationFrame = ({
     duration: midi.duration,
     currentTime,
     overviewProgress,
+    keyboardRange,
   })
   renderGrandStaff({
     ctx,

@@ -30,6 +30,9 @@ import {
 
 interface ControlsProps {
   disabled: boolean
+  practiceActive: boolean
+  demonstrationActive: boolean
+  practiceRateLocked: boolean
   isPlaying: boolean
   isPreparing: boolean
   keyAnalysisVisible: boolean
@@ -101,6 +104,9 @@ const formatPlaybackRate = (playbackRate: PlaybackRate) => {
 
 export function Controls({
   disabled,
+  practiceActive,
+  demonstrationActive,
+  practiceRateLocked,
   isPlaying,
   isPreparing,
   keyAnalysisVisible,
@@ -139,16 +145,18 @@ export function Controls({
   onToggleTrack,
   onToggleZen,
 }: ControlsProps) {
+  const controlsLocked = disabled || practiceActive || demonstrationActive
+
   return (
     <section className="controls" aria-label="Playback controls">
       <div className="transport-row">
         <button
           className="icon-button"
           type="button"
-          disabled={disabled || isPreparing}
+          disabled={disabled || practiceActive || isPreparing}
           title={isPreparing ? 'Loading instrument' : isPlaying ? 'Pause' : 'Play'}
           aria-label={isPreparing ? 'Loading instrument' : isPlaying ? 'Pause' : 'Play'}
-          onClick={isPlaying ? onPause : onPlay}
+          onClick={isPlaying ? onPause : () => void onPlay()}
         >
           {isPreparing ? (
             <LoaderCircle className="loading-icon" size={17} />
@@ -162,8 +170,8 @@ export function Controls({
           className="icon-button"
           type="button"
           disabled={disabled}
-          title="Stop"
-          aria-label="Stop"
+          title={practiceActive ? 'End Duet' : 'Stop'}
+          aria-label={practiceActive ? 'End Duet' : 'Stop'}
           onClick={onStop}
         >
           <Square size={15} />
@@ -175,7 +183,7 @@ export function Controls({
               : 'icon-button reverse-toggle'
           }
           type="button"
-          disabled={disabled || isPlaying || isPreparing}
+          disabled={controlsLocked || isPlaying || isPreparing}
           title={
             isPlaying || isPreparing
               ? 'Pause playback to change direction'
@@ -192,6 +200,7 @@ export function Controls({
           <select
             className="sound-select"
             value={soundPreset}
+            disabled={controlsLocked}
             aria-label="Sound preset"
             onChange={(event) =>
               onSoundPresetChange(event.currentTarget.value as SoundPreset)
@@ -207,7 +216,7 @@ export function Controls({
         <select
           className="speed-select"
           value={playbackRate}
-          disabled={disabled}
+          disabled={disabled || practiceRateLocked}
           aria-label="Playback speed"
           onChange={(event) =>
             onPlaybackRateChange(Number(event.currentTarget.value) as PlaybackRate)
@@ -232,7 +241,7 @@ export function Controls({
             max={MAX_VOLUME}
             step={0.01}
             value={volume}
-            disabled={disabled}
+            disabled={controlsLocked}
             aria-label="Volume"
             onChange={(event) =>
               onVolumeChange(Number(event.currentTarget.value))
@@ -241,7 +250,9 @@ export function Controls({
           <button
             className="icon-button compact-button"
             type="button"
-            disabled={disabled || Math.abs(volume - DEFAULT_VOLUME) < 0.005}
+            disabled={
+              controlsLocked || Math.abs(volume - DEFAULT_VOLUME) < 0.005
+            }
             title="Reset volume"
             aria-label="Reset volume"
             onClick={() => onVolumeChange(DEFAULT_VOLUME)}
@@ -253,7 +264,7 @@ export function Controls({
           <button
             className="icon-button compact-button"
             type="button"
-            disabled={disabled || transposeSemitones <= MIN_TRANSPOSE}
+            disabled={controlsLocked || transposeSemitones <= MIN_TRANSPOSE}
             title="Transpose down"
             aria-label="Transpose down"
             onClick={() => onTransposeChange(transposeSemitones - 1)}
@@ -267,7 +278,7 @@ export function Controls({
             max={MAX_TRANSPOSE}
             step={1}
             value={transposeSemitones}
-            disabled={disabled}
+            disabled={controlsLocked}
             aria-label="Transpose semitones"
             onChange={(event) =>
               onTransposeChange(Number(event.currentTarget.value))
@@ -279,7 +290,7 @@ export function Controls({
           <button
             className="icon-button compact-button"
             type="button"
-            disabled={disabled || transposeSemitones >= MAX_TRANSPOSE}
+            disabled={controlsLocked || transposeSemitones >= MAX_TRANSPOSE}
             title="Transpose up"
             aria-label="Transpose up"
             onClick={() => onTransposeChange(transposeSemitones + 1)}
@@ -289,7 +300,7 @@ export function Controls({
           <button
             className="icon-button compact-button"
             type="button"
-            disabled={disabled || transposeSemitones === 0}
+            disabled={controlsLocked || transposeSemitones === 0}
             title="Reset transpose"
             aria-label="Reset transpose"
             onClick={() => onTransposeChange(0)}
@@ -329,7 +340,7 @@ export function Controls({
             max={Math.max(duration, 0.01)}
             step={0.01}
             value={Math.min(currentTime, duration)}
-            disabled={disabled}
+            disabled={controlsLocked}
             aria-label="Playback progress"
             onChange={(event) => onSeek(Number(event.currentTarget.value))}
           />
@@ -356,7 +367,7 @@ export function Controls({
               : 'icon-button key-analysis-toggle'
           }
           type="button"
-          disabled={disabled || isPlaying || isPreparing}
+          disabled={controlsLocked || isPlaying || isPreparing}
           title={
             isPlaying || isPreparing
               ? 'Pause playback to analyze local key'
@@ -384,7 +395,7 @@ export function Controls({
                   : 'icon-button symmetry-toggle axis-symmetry-toggle'
               }
               type="button"
-              disabled={disabled}
+              disabled={controlsLocked}
               title={
                 axisSymmetryEnabled
                   ? 'Hide axial pitch symmetry'
@@ -406,7 +417,7 @@ export function Controls({
                   : 'icon-button symmetry-toggle center-symmetry-toggle'
               }
               type="button"
-              disabled={disabled}
+              disabled={controlsLocked}
               title={
                 centerSymmetryEnabled
                   ? 'Hide central pitch symmetry'
@@ -431,7 +442,7 @@ export function Controls({
             <input
               type="checkbox"
               checked={showChromaticLines}
-              disabled={disabled}
+              disabled={controlsLocked}
               aria-label="Show semitone lines"
               onChange={onToggleChromaticLines}
             />
@@ -442,7 +453,7 @@ export function Controls({
             <input
               type="checkbox"
               checked={showStaffLines}
-              disabled={disabled}
+              disabled={controlsLocked}
               aria-label="Show staff lines"
               onChange={onToggleStaffLines}
             />
@@ -457,6 +468,7 @@ export function Controls({
               key={track.track}
               className={isVisible ? 'track-chip is-visible' : 'track-chip'}
               type="button"
+              disabled={controlsLocked}
               title={`${isVisible ? 'Hide' : 'Show'} ${track.name}`}
               onClick={() => onToggleTrack(track.track)}
             >

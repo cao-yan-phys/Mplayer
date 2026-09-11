@@ -1,5 +1,5 @@
 import { Piano } from '@tonejs/piano/build/piano/Piano'
-import { Filter, now as toneNow, Reverb, start as startTone } from 'tone'
+import { Filter, Gain, now as toneNow, start as startTone } from 'tone'
 import type { MidiNote } from '../midi/noteTypes'
 import {
   KEYBOARD_MAX_MIDI,
@@ -52,9 +52,6 @@ const NON_GRAND_PRESET_GAIN = 4
 const SMALL_PIANO_PRESET_GAIN = 1.25
 const GRAND_PIANO_LOOKAHEAD_SECONDS = 0.72
 const GRAND_PIANO_FILTER_FREQUENCY = 6800
-const GRAND_PIANO_REVERB_DECAY = 2.8
-const GRAND_PIANO_REVERB_PRE_DELAY = 0.025
-const GRAND_PIANO_REVERB_WET = 0.065
 const KEYBOARD_NOTE_VELOCITY = 0.76
 export const DEFAULT_VOLUME = 0.85
 export const MAX_VOLUME = 2
@@ -153,17 +150,15 @@ export class MidiTransport {
 
   private pianoPreviewLoadPromise: Promise<void> | null = null
 
-  private keyboardPiano: Piano | null = null
+  private keyboardPianos = new Map<string, Piano>()
 
-  private keyboardPianoLoadPromise: Promise<void> | null = null
-
-  private keyboardPianoRangeKey = ''
+  private keyboardPianoLoadPromises = new Map<string, Promise<void>>()
 
   private keyboardPianoGeneration = 0
 
-  private pianoReverb: Reverb | null = null
-
   private pianoToneFilter: Filter | null = null
+
+  private pianoOutputGate: Gain | null = null
 
   private pianoRangeKey = ''
 
@@ -249,6 +244,9 @@ export class MidiTransport {
     }
 
     this.soundPreset = soundPreset
+    if (wasPlaying && soundPreset === 'grandPiano') {
+      this.openPianoOutput()
+    }
     this.applyMasterGain(
       wasPlaying ? SOUND_SWITCH_SETTLE_SECONDS : 0,
     )
@@ -289,6 +287,50 @@ export class MidiTransport {
     if (this.soundPreset === 'ocarina' && this.notes.length > 0) {
       void this.ensureOcarinaLoaded()
     }
+  }
+
+  async preparePractice() {
+    const context = this.ensureContext()
+    await context.resume()
+
+    if (this.soundPreset === 'grandPiano') {
+      await startTone()
+      await this.ensurePianoLoaded()
+    }
+
+    if (this.soundPreset === 'musicBox') {
+      await this.ensureMusicBoxLoaded()
+    }
+
+    if (this.soundPreset === 'ocarina') {
+      await this.ensureOcarinaLoaded()
+    }
+  }
+
+  async playPracticeNotes(
+    notes: readonly MidiNote[],
+    startAt: number,
+    endAt: number,
+  ) {
+    await this.preparePractice()
+
+    if (this.soundPreset === 'grandPiano') {
+      this.openPianoOutput()
+    }
+
+    const context = this.context
+
+    if (!context || endAt <= startAt) {
+      return
+    }
+
+    const audioStart = context.currentTime + 0.025
+
+    notes.forEach((note) => {
+      if (note.start >= startAt && note.start < endAt) {
+        this.scheduleNote(note, startAt, audioStart)
+      }
+    })
   }
 
   setPlaybackRate(playbackRate: PlaybackRate) {
@@ -366,6 +408,9 @@ export class MidiTransport {
     this.clearScheduler()
     this.releaseKeyboardNotes()
     this.stopActiveVoices()
+    if (this.soundPreset === 'grandPiano') {
+      this.openPianoOutput()
+    }
     this.state = 'playing'
     this.position = clamp(startAt, 0, this.duration)
     this.basePosition = this.position
@@ -445,6 +490,7 @@ export class MidiTransport {
         return
       }
 
+      this.openPianoOutput()
       piano.keyDown({
         midi: safePitch,
         time: toneNow(),
@@ -495,6 +541,14 @@ export class MidiTransport {
   prepareKeyboardOctave(octaveLevel: number) {
     return this.ensureKeyboardPianoLoaded(
       this.getKeyboardPianoRange(octaveLevel),
+    )
+  }
+
+  async prepareKeyboardOctaves(octaveLevels: readonly number[]) {
+    await Promise.all(
+      [...new Set(octaveLevels)].map((octaveLevel) =>
+        this.prepareKeyboardOctave(octaveLevel),
+      ),
     )
   }
 
@@ -769,61 +823,58 @@ export class MidiTransport {
     range: ReturnType<MidiTransport['getKeyboardPianoRange']>,
   ) {
     const loaded = await this.ensureKeyboardPianoLoaded(range)
+    const piano = this.keyboardPianos.get(range.key)
 
-    return loaded && this.keyboardPiano?.loaded ? this.keyboardPiano : null
+    return loaded && piano?.loaded ? piano : null
   }
 
   private async ensureKeyboardPianoLoaded(
     range: ReturnType<MidiTransport['getKeyboardPianoRange']>,
   ) {
-    if (this.keyboardPiano?.loaded && this.keyboardPianoRangeKey === range.key) {
+    const existingPiano = this.keyboardPianos.get(range.key)
+
+    if (existingPiano?.loaded) {
       return true
     }
 
-    if (
-      this.keyboardPianoLoadPromise &&
-      this.keyboardPianoRangeKey === range.key
-    ) {
+    const existingLoadPromise = this.keyboardPianoLoadPromises.get(range.key)
+
+    if (existingLoadPromise) {
       try {
-        await this.keyboardPianoLoadPromise
+        await existingLoadPromise
       } catch {
         return false
       }
 
-      return Boolean(this.keyboardPiano?.loaded)
+      return Boolean(this.keyboardPianos.get(range.key)?.loaded)
     }
 
-    if (this.keyboardPianoRangeKey && this.keyboardPianoRangeKey !== range.key) {
-      this.resetKeyboardPiano()
-    }
-
-    this.keyboardPianoRangeKey = range.key
     const generation = this.keyboardPianoGeneration
     const piano = this.createPiano(range, 1, false)
     const loadPromise = piano.load()
 
-    this.keyboardPiano = piano
-    this.keyboardPianoLoadPromise = loadPromise
+    this.keyboardPianos.set(range.key, piano)
+    this.keyboardPianoLoadPromises.set(range.key, loadPromise)
 
     try {
       await loadPromise
       return (
         this.keyboardPianoGeneration === generation &&
-        this.keyboardPiano === piano
+        this.keyboardPianos.get(range.key) === piano
       )
     } catch {
-      if (this.keyboardPiano === piano) {
+      if (this.keyboardPianos.get(range.key) === piano) {
         piano.dispose()
-        this.keyboardPiano = null
+        this.keyboardPianos.delete(range.key)
       }
 
       return false
     } finally {
       if (
         this.keyboardPianoGeneration === generation &&
-        this.keyboardPianoLoadPromise === loadPromise
+        this.keyboardPianoLoadPromises.get(range.key) === loadPromise
       ) {
-        this.keyboardPianoLoadPromise = null
+        this.keyboardPianoLoadPromises.delete(range.key)
       }
     }
   }
@@ -858,23 +909,38 @@ export class MidiTransport {
       Q: 0.16,
       rolloff: -12,
     })
-    this.pianoToneFilter.connect(this.getPianoReverb())
+    this.pianoToneFilter.connect(this.getPianoOutputGate())
 
     return this.pianoToneFilter
   }
 
-  private getPianoReverb() {
-    if (this.pianoReverb) {
-      return this.pianoReverb
+  private getPianoOutputGate() {
+    if (this.pianoOutputGate) {
+      return this.pianoOutputGate
     }
 
-    this.pianoReverb = new Reverb({
-      decay: GRAND_PIANO_REVERB_DECAY,
-      preDelay: GRAND_PIANO_REVERB_PRE_DELAY,
-      wet: GRAND_PIANO_REVERB_WET,
-    }).toDestination()
+    this.pianoOutputGate = new Gain(1).toDestination()
+    return this.pianoOutputGate
+  }
 
-    return this.pianoReverb
+  private openPianoOutput() {
+    if (!this.pianoOutputGate) {
+      return
+    }
+
+    const time = toneNow()
+    this.pianoOutputGate.gain.cancelScheduledValues(time)
+    this.pianoOutputGate.gain.setValueAtTime(1, time)
+  }
+
+  private closePianoOutput() {
+    if (!this.pianoOutputGate) {
+      return
+    }
+
+    const time = toneNow()
+    this.pianoOutputGate.gain.cancelScheduledValues(time)
+    this.pianoOutputGate.gain.setTargetAtTime(0.0001, time, 0.006)
   }
 
   private resetPiano() {
@@ -891,18 +957,19 @@ export class MidiTransport {
     this.pianoPreviewLoadPromise = null
     this.pianoToneFilter?.dispose()
     this.pianoToneFilter = null
-    this.pianoReverb?.dispose()
-    this.pianoReverb = null
+    this.pianoOutputGate?.dispose()
+    this.pianoOutputGate = null
     this.pianoRangeKey = ''
   }
 
   private resetKeyboardPiano() {
     this.keyboardPianoGeneration += 1
-    this.keyboardPiano?.stopAll()
-    this.keyboardPiano?.dispose()
-    this.keyboardPiano = null
-    this.keyboardPianoLoadPromise = null
-    this.keyboardPianoRangeKey = ''
+    this.keyboardPianos.forEach((piano) => {
+      piano.stopAll()
+      piano.dispose()
+    })
+    this.keyboardPianos.clear()
+    this.keyboardPianoLoadPromises.clear()
   }
 
   private getMasterGain() {
@@ -952,7 +1019,11 @@ export class MidiTransport {
 
   private applyPianoVolume() {
     const volumes = this.getPianoVolumes()
-    const pianos = [this.piano, this.pianoPreview, this.keyboardPiano]
+    const pianos = [
+      this.piano,
+      this.pianoPreview,
+      ...this.keyboardPianos.values(),
+    ]
 
     pianos.forEach((piano) => {
       if (!piano) {
@@ -1456,9 +1527,11 @@ export class MidiTransport {
 
     this.releaseKeyboardNotes()
 
+    this.closePianoOutput()
+
     this.piano?.stopAll()
     this.pianoPreview?.stopAll()
-    this.keyboardPiano?.stopAll()
+    this.keyboardPianos.forEach((piano) => piano.stopAll())
 
     this.activeVoices.forEach((voice) => {
       voice.gains.forEach((gain) => {

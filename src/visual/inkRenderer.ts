@@ -1,4 +1,4 @@
-import type { MidiNote } from '../midi/noteTypes'
+import type { MidiNote, PitchRange } from '../midi/noteTypes'
 import {
   type CoordinateSystem,
   createCoordinateSystem,
@@ -16,6 +16,7 @@ interface RenderInkOptions {
   currentTime: number
   overviewProgress?: number
   visibleTracks: ReadonlySet<number>
+  keyboardRange?: PitchRange
 }
 
 export interface InkRenderMetrics {
@@ -72,6 +73,7 @@ interface InkCoordinateOptions {
   duration: number
   currentTime: number
   overviewProgress?: number
+  keyboardRange?: PitchRange
 }
 
 const createOverviewCoordinateSystem = (
@@ -171,11 +173,20 @@ export const getInkCoordinates = ({
   duration,
   currentTime,
   overviewProgress = 0,
+  keyboardRange,
 }: InkCoordinateOptions) => {
   const pitchRange = getPitchRange(notes)
   const safePitchRange = {
-    min: Math.min(Number.isFinite(pitchRange.min) ? pitchRange.min : 48, 43),
-    max: Math.max(Number.isFinite(pitchRange.max) ? pitchRange.max : 72, 77),
+    min: Math.min(
+      Number.isFinite(pitchRange.min) ? pitchRange.min : 48,
+      43,
+      keyboardRange?.min ?? Number.POSITIVE_INFINITY,
+    ),
+    max: Math.max(
+      Number.isFinite(pitchRange.max) ? pitchRange.max : 72,
+      77,
+      keyboardRange?.max ?? Number.NEGATIVE_INFINITY,
+    ),
   }
 
   return createSettledCoordinateSystem(
@@ -413,6 +424,7 @@ export const renderInkFlow = ({
   currentTime,
   overviewProgress = 0,
   visibleTracks,
+  keyboardRange,
 }: RenderInkOptions): InkRenderMetrics => {
   const progress = clamp(overviewProgress, 0, 1)
   const coordinates = getInkCoordinates({
@@ -422,6 +434,7 @@ export const renderInkFlow = ({
     duration,
     currentTime,
     overviewProgress: progress,
+    keyboardRange,
   })
   const overviewInkScale = clamp(width / Math.max(duration * 120, width), 0.3, 1)
   const inkScale = lerp(1, overviewInkScale, easeOutCubic(progress))

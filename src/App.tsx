@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { CanvasView } from './components/CanvasView'
 import { Controls } from './components/Controls'
 import { MidiDropzone } from './components/MidiDropzone'
@@ -6,13 +13,16 @@ import { findMotifGroups } from './midi/motifAnalysis'
 import { analyzeLocalKey } from './midi/keyAnalysis'
 import {
   DEFAULT_KEYBOARD_OCTAVE_LEVEL,
+  clampKeyboardOctaveLevel,
   isEditableKeyboardTarget,
+  keyboardBindingsForOctaveLevel,
   keyboardOctaveLevelForCode,
+  keyboardOctaveStepForCode,
   keyboardPitchForCode,
 } from './playback/keyboardMap'
 import { parseGwCsv } from './midi/parseGwCsv'
 import { parseMidi } from './midi/parseMidi'
-import type { ParsedMidi } from './midi/noteTypes'
+import type { MidiNote, ParsedMidi } from './midi/noteTypes'
 import { reverseMidi } from './midi/reverseMidi'
 import { findSymmetryGroups } from './midi/symmetryAnalysis'
 import { clampTranspose, transposeMidi } from './midi/transposeMidi'
@@ -23,16 +33,134 @@ import {
   type PlaybackRate,
   type SoundPreset,
 } from './playback/transport'
+import {
+  choosePracticeOctaveLevels,
+  createPracticeEvents,
+  getPracticeTracks,
+  type PracticeEvent,
+  type PracticeVoice,
+} from './playback/duetPractice'
 
 const defaultMidiFileName = 'BWV862_prelude.mid'
 const defaultMidiUrl = `${import.meta.env.BASE_URL}${defaultMidiFileName}`
+const ariaMidiFileName = 'BWV988_Aria.mid'
+const preludeMidiFileName = 'BWV846_prelude.mid'
 const defaultCsvFileName = 'sxs_bbh_0001_i60_phi0_ell8.csv'
 const defaultCsvUrl = `${import.meta.env.BASE_URL}${defaultCsvFileName}`
+const PRACTICE_SEQUENCE_LENGTH = 10
 
 type SourceKind = 'midi' | 'csv'
 
+type PracticeStatus = 'preparing' | 'waiting' | 'running' | 'complete'
+
+type DuetMode = PracticeVoice | 'demonstration'
+
+type PracticePieceId = 'aria' | 'prelude'
+
+interface PracticePiece {
+  id: PracticePieceId
+  label: string
+  fileName: string
+  defaultOctaveLevels: Record<PracticeVoice, number>
+  automaticallySwitchOctaves: boolean
+}
+
+const practicePieces: Record<PracticePieceId, PracticePiece> = {
+  aria: {
+    id: 'aria',
+    label: 'Duet 1',
+    fileName: ariaMidiFileName,
+    defaultOctaveLevels: { upper: 5, lower: 3 },
+    automaticallySwitchOctaves: false,
+  },
+  prelude: {
+    id: 'prelude',
+    label: 'Duet 2',
+    fileName: preludeMidiFileName,
+    defaultOctaveLevels: { upper: 4, lower: 3 },
+    automaticallySwitchOctaves: true,
+  },
+}
+
+interface PracticeSession {
+  runId: number
+  piece: PracticePieceId
+  voice: PracticeVoice
+  events: PracticeEvent[]
+  fixedOctaveLevel: number | null
+  octaveLevels: number[]
+  companionNotes: MidiNote[]
+  duration: number
+  gateIndex: number
+  status: PracticeStatus
+}
+
+interface PracticeSequenceData {
+  lineStart: number
+  items: Array<{
+    isCompleted: boolean
+    isCurrent: boolean
+    notes: Array<{
+      keyLabel: string
+    }>
+  }>
+}
+
+interface PracticeSequencePosition {
+  left: number
+  top: number
+}
+
 const isMidiFile = (file: File) => /\.(mid|midi)$/i.test(file.name)
 const isCsvFile = (file: File) => /\.csv$/i.test(file.name)
+const practicePieceForFileName = (fileName: string) =>
+  Object.values(practicePieces).find(
+    (piece) => piece.fileName.toLowerCase() === fileName.toLowerCase(),
+  )
+
+function PracticeSequence({
+  sequence,
+  position,
+}: {
+  sequence: PracticeSequenceData
+  position: PracticeSequencePosition
+}) {
+  return (
+    <div
+      className="practice-sequence-host"
+      style={{ left: position.left, top: position.top }}
+    >
+      <div
+        className="practice-sequence"
+        aria-label="Practice sequence"
+        key={sequence.lineStart}
+      >
+        {sequence.items.map((event, eventIndex) => (
+          <div
+            className={
+              [
+                'practice-sequence__event',
+                event.isCompleted ? 'is-completed' : '',
+                event.isCurrent ? 'is-current' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')
+            }
+            key={eventIndex}
+          >
+            <div className="practice-sequence__keys">
+              {event.notes.map((note, noteIndex) => (
+                <kbd key={`${note.keyLabel}-${noteIndex}`}>
+                  {note.keyLabel}
+                </kbd>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 function App() {
   const [sourceMidi, setSourceMidi] = useState<ParsedMidi | null>(null)
@@ -46,7 +174,7 @@ function App() {
   const [volume, setVolume] = useState(DEFAULT_VOLUME)
   const [transposeSemitones, setTransposeSemitones] = useState(0)
   const [reversePlayback, setReversePlayback] = useState(false)
-  const [motifTraceEnabled, setMotifTraceEnabled] = useState(true)
+  const [motifTraceEnabled, setMotifTraceEnabled] = useState(false)
   const [axisSymmetryEnabled, setAxisSymmetryEnabled] = useState(false)
   const [centerSymmetryEnabled, setCenterSymmetryEnabled] = useState(false)
   const [showChromaticLines, setShowChromaticLines] = useState(true)
@@ -64,10 +192,42 @@ function App() {
   const [keyboardOctaveLevel, setKeyboardOctaveLevel] = useState(
     DEFAULT_KEYBOARD_OCTAVE_LEVEL,
   )
+  const [activeGameMenu, setActiveGameMenu] =
+    useState<PracticePieceId | null>(null)
+  const [demonstrationPiece, setDemonstrationPiece] =
+    useState<PracticePieceId | null>(null)
+  const [practiceSession, setPracticeSession] =
+    useState<PracticeSession | null>(null)
+  const [isDuetTwoLeadIn, setIsDuetTwoLeadIn] = useState(false)
+  const [practiceSequencePosition, setPracticeSequencePosition] =
+    useState<PracticeSequencePosition | null>(null)
   const appRef = useRef<HTMLDivElement | null>(null)
+  const controlsAnchorRef = useRef<HTMLDivElement | null>(null)
   const transportRef = useRef<MidiTransport | null>(null)
   const loadRequestIdRef = useRef(0)
   const playRequestIdRef = useRef(0)
+  const practiceRef = useRef<PracticeSession | null>(null)
+  const practiceFrameRef = useRef<number | null>(null)
+  const duetTwoLeadInFrameRef = useRef<number | null>(null)
+  const duetTwoLeadInRef = useRef(false)
+  const practiceRunIdRef = useRef(0)
+  const heldKeyboardPitchesRef = useRef(new Set<number>())
+  const practiceMatchedPitchesRef = useRef(new Set<number>())
+  const currentTimeRef = useRef(currentTime)
+  const keyboardOctaveLevelRef = useRef(keyboardOctaveLevel)
+  const lastPracticeUiUpdateRef = useRef(0)
+
+  const isDemonstration = demonstrationPiece !== null
+  const isPracticeAnimating =
+    practiceSession?.status === 'running' || isDuetTwoLeadIn
+
+  if (
+    practiceRef.current?.status !== 'running' &&
+    !duetTwoLeadInRef.current
+  ) {
+    currentTimeRef.current = currentTime
+  }
+  keyboardOctaveLevelRef.current = keyboardOctaveLevel
   const midi = useMemo(() => {
     if (!sourceMidi) {
       return null
@@ -99,17 +259,194 @@ function App() {
         : { axis: [], center: [] },
     [sourceKind, midi],
   )
+  const practiceSequence = useMemo<PracticeSequenceData | null>(() => {
+    if (
+      !practiceSession ||
+      practiceSession.status === 'preparing' ||
+      practiceSession.status === 'complete'
+    ) {
+      return null
+    }
+
+    const nextEventIndex =
+      practiceSession.status === 'running'
+        ? practiceSession.gateIndex + 1
+        : practiceSession.gateIndex
+    const currentEventIndex =
+      practiceSession.status === 'waiting' ? practiceSession.gateIndex : -1
+
+    if (nextEventIndex >= practiceSession.events.length) {
+      return null
+    }
+
+    const lineStart =
+      Math.floor(nextEventIndex / PRACTICE_SEQUENCE_LENGTH) *
+      PRACTICE_SEQUENCE_LENGTH
+
+    return {
+      lineStart,
+      items: practiceSession.events
+        .slice(lineStart, lineStart + PRACTICE_SEQUENCE_LENGTH)
+        .map((event, index) => ({
+          isCompleted: lineStart + index < nextEventIndex,
+          isCurrent: lineStart + index === currentEventIndex,
+          notes: event.notes.map((note) => {
+            const bindings = keyboardBindingsForOctaveLevel(
+              practiceSession.fixedOctaveLevel ??
+                practiceSession.octaveLevels[lineStart + index] ??
+                keyboardOctaveLevel,
+            )
+            const binding = bindings.find((item) => item.pitch === note.pitch)
+
+            return {
+              keyLabel: binding?.label ?? '?',
+            }
+          }),
+        })),
+    }
+  }, [keyboardOctaveLevel, practiceSession])
+
+  const demonstrationSequence = useMemo<PracticeSequenceData | null>(() => {
+    const piece =
+      demonstrationPiece === null
+        ? undefined
+        : practicePieces[demonstrationPiece]
+
+    if (
+      !piece ||
+      !sourceMidi ||
+      practicePieceForFileName(sourceMidi.fileName)?.id !== piece.id
+    ) {
+      return null
+    }
+
+    const tracks = getPracticeTracks(sourceMidi)
+
+    if (!tracks) {
+      return null
+    }
+
+    const events = createPracticeEvents(
+      sourceMidi.notes.filter((note) => note.track === tracks.upper),
+    )
+    const octaveLevels = piece.automaticallySwitchOctaves
+      ? choosePracticeOctaveLevels(
+          events,
+          piece.defaultOctaveLevels.upper,
+        )
+      : events.map(() => piece.defaultOctaveLevels.upper)
+    const currentEventIndex = events.findLastIndex(
+      (event) => event.start <= currentTime + 0.0001,
+    )
+
+    if (currentEventIndex < 0) {
+      return null
+    }
+
+    const lineStart =
+      Math.floor(currentEventIndex / PRACTICE_SEQUENCE_LENGTH) *
+      PRACTICE_SEQUENCE_LENGTH
+
+    return {
+      lineStart,
+      items: events
+        .slice(lineStart, lineStart + PRACTICE_SEQUENCE_LENGTH)
+        .map((event, index) => ({
+          isCompleted: lineStart + index < currentEventIndex,
+          isCurrent: lineStart + index === currentEventIndex,
+          notes: event.notes.map((note) => {
+            const bindings = keyboardBindingsForOctaveLevel(
+              octaveLevels[lineStart + index] ??
+                piece.defaultOctaveLevels.upper,
+            )
+            const binding = bindings.find((item) => item.pitch === note.pitch)
+
+            return { keyLabel: binding?.label ?? '?' }
+          }),
+        })),
+    }
+  }, [currentTime, demonstrationPiece, sourceMidi])
+
+  const activeSequence = practiceSequence ?? demonstrationSequence
+  const hasActiveSequence = activeSequence !== null
+
+  useLayoutEffect(() => {
+    const anchor = controlsAnchorRef.current
+
+    if (!hasActiveSequence || !anchor) {
+      setPracticeSequencePosition(null)
+      return
+    }
+
+    const updatePosition = () => {
+      const rect = anchor.getBoundingClientRect()
+      const availableHeight = Math.max(window.innerHeight - rect.bottom, 0)
+      const nextPosition = {
+        left: rect.left + rect.width * 0.3,
+        top: rect.bottom + availableHeight / 2,
+      }
+
+      setPracticeSequencePosition((current) =>
+        current &&
+        Math.abs(current.left - nextPosition.left) < 0.5 &&
+        Math.abs(current.top - nextPosition.top) < 0.5
+          ? current
+          : nextPosition,
+      )
+    }
+
+    const observer = new ResizeObserver(updatePosition)
+
+    observer.observe(anchor)
+    window.addEventListener('resize', updatePosition)
+    window.visualViewport?.addEventListener('resize', updatePosition)
+    updatePosition()
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updatePosition)
+      window.visualViewport?.removeEventListener('resize', updatePosition)
+    }
+  }, [hasActiveSequence])
 
   if (!transportRef.current) {
     transportRef.current = new MidiTransport((endedAt) => {
       setCurrentTime(endedAt)
       setIsPlaying(false)
       setIsOverview(true)
+      setDemonstrationPiece(null)
     })
   }
 
+  const clearPracticeSession = useCallback(() => {
+    practiceRunIdRef.current += 1
+
+    if (practiceFrameRef.current !== null) {
+      window.cancelAnimationFrame(practiceFrameRef.current)
+      practiceFrameRef.current = null
+    }
+
+    if (duetTwoLeadInFrameRef.current !== null) {
+      window.cancelAnimationFrame(duetTwoLeadInFrameRef.current)
+      duetTwoLeadInFrameRef.current = null
+    }
+
+    practiceRef.current = null
+    duetTwoLeadInRef.current = false
+    heldKeyboardPitchesRef.current.clear()
+    practiceMatchedPitchesRef.current.clear()
+    transportRef.current?.stop()
+    setPracticeSession(null)
+    setIsDuetTwoLeadIn(false)
+    setDemonstrationPiece(null)
+    setActiveGameMenu(null)
+    setPressedKeyboardPitches(new Set())
+    setPressedKeyboardCodes(new Set())
+  }, [])
+
   const loadParsedMidi = useCallback((parsed: ParsedMidi, kind: SourceKind) => {
     playRequestIdRef.current += 1
+    clearPracticeSession()
     const nextVisibleTracks = new Set(parsed.tracks.map((track) => track.track))
 
     transportRef.current?.load(parsed.notes, parsed.duration, nextVisibleTracks)
@@ -122,7 +459,7 @@ function App() {
     setSourceKind(kind)
     setTransposeSemitones(0)
     setReversePlayback(false)
-    setMotifTraceEnabled(kind === 'midi')
+    setMotifTraceEnabled(false)
     setCurrentTime(0)
     setIsPlaying(false)
     setIsPreparing(false)
@@ -132,7 +469,7 @@ function App() {
     setPressedKeyboardPitches(new Set())
     setPressedKeyboardCodes(new Set())
     setVisibleTracks(nextVisibleTracks)
-  }, [])
+  }, [clearPracticeSession])
 
   useEffect(() => {
     if (!isPlaying) {
@@ -246,11 +583,206 @@ function App() {
     transportRef.current?.setVolume(volume)
   }, [volume])
 
+  const applyKeyboardOctave = useCallback((octaveLevel: number) => {
+    const nextOctaveLevel = clampKeyboardOctaveLevel(octaveLevel)
+
+    if (nextOctaveLevel === keyboardOctaveLevelRef.current) {
+      return
+    }
+
+    transportRef.current?.releaseKeyboardNotes()
+    heldKeyboardPitchesRef.current.clear()
+    practiceMatchedPitchesRef.current.clear()
+    setPressedKeyboardPitches(new Set())
+    setPressedKeyboardCodes(new Set())
+    keyboardOctaveLevelRef.current = nextOctaveLevel
+    setKeyboardOctaveLevel(nextOctaveLevel)
+    void transportRef.current?.prepareKeyboardOctave(nextOctaveLevel)
+  }, [])
+
+  const advancePractice = useCallback(() => {
+    const session = practiceRef.current
+    const transport = transportRef.current
+
+    if (!session || !transport || session.status !== 'waiting') {
+      return
+    }
+
+    const event = session.events[session.gateIndex]
+
+    if (!event) {
+      return
+    }
+
+    const targetPitches = new Set(event.notes.map((note) => note.pitch))
+    if (
+      [...targetPitches].some(
+        (pitch) => !practiceMatchedPitchesRef.current.has(pitch),
+      )
+    ) {
+      return
+    }
+
+    const nextEvent = session.events[session.gateIndex + 1]
+    const segmentStart = event.start
+    const segmentEnd = nextEvent?.start ?? session.duration
+    const runningSession = {
+      ...session,
+      status: 'running' as const,
+    }
+
+    practiceRef.current = runningSession
+    setPracticeSession(runningSession)
+
+    void (async () => {
+      try {
+        await transport.playPracticeNotes(
+          runningSession.companionNotes,
+          segmentStart,
+          segmentEnd,
+        )
+      } catch (caughtError) {
+        if (practiceRef.current?.runId === runningSession.runId) {
+          setError(
+            caughtError instanceof Error
+              ? caughtError.message
+              : 'Could not continue Game.',
+          )
+          clearPracticeSession()
+        }
+        return
+      }
+
+      if (practiceRef.current?.runId !== runningSession.runId) {
+        return
+      }
+
+      const startedAt = performance.now()
+      currentTimeRef.current = segmentStart
+      lastPracticeUiUpdateRef.current = startedAt
+      const durationMs = Math.max(
+        1,
+        ((segmentEnd - segmentStart) / playbackRate) * 1000,
+      )
+
+      const advanceFrame = (now: number) => {
+        if (practiceRef.current?.runId !== runningSession.runId) {
+          return
+        }
+
+        const progress = Math.min(Math.max((now - startedAt) / durationMs, 0), 1)
+        const nextTime = segmentStart + (segmentEnd - segmentStart) * progress
+
+        currentTimeRef.current = nextTime
+
+        if (
+          progress >= 1 ||
+          now - lastPracticeUiUpdateRef.current >= 100
+        ) {
+          lastPracticeUiUpdateRef.current = now
+          setCurrentTime(nextTime)
+        }
+
+        if (progress < 1) {
+          practiceFrameRef.current = window.requestAnimationFrame(advanceFrame)
+          return
+        }
+
+        practiceFrameRef.current = null
+        const activeSession = practiceRef.current
+
+        if (!activeSession) {
+          return
+        }
+
+        const nextSession: PracticeSession = nextEvent
+          ? {
+              ...activeSession,
+              gateIndex: activeSession.gateIndex + 1,
+              status: 'waiting',
+            }
+          : {
+              ...activeSession,
+              gateIndex: activeSession.events.length,
+              status: 'complete',
+            }
+
+        practiceRef.current = nextSession
+        practiceMatchedPitchesRef.current.clear()
+
+        if (
+          nextSession.status === 'waiting' &&
+          nextSession.piece === 'prelude'
+        ) {
+          applyKeyboardOctave(
+            nextSession.octaveLevels[nextSession.gateIndex] ??
+              keyboardOctaveLevelRef.current,
+          )
+        }
+
+        if (nextSession.status === 'waiting') {
+          const nextPracticeEvent =
+            nextSession.events[nextSession.gateIndex]
+
+          nextPracticeEvent?.notes.forEach((note) => {
+            if (heldKeyboardPitchesRef.current.has(note.pitch)) {
+              practiceMatchedPitchesRef.current.add(note.pitch)
+            }
+          })
+        }
+
+        setPracticeSession(nextSession)
+
+        if (nextSession.status === 'waiting') {
+          window.setTimeout(advancePractice, 0)
+        }
+      }
+
+      practiceFrameRef.current = window.requestAnimationFrame(advanceFrame)
+    })()
+  }, [applyKeyboardOctave, clearPracticeSession, playbackRate])
+
+  useEffect(() => {
+    if (!demonstrationPiece || !sourceMidi) {
+      return
+    }
+
+    const piece = practicePieces[demonstrationPiece]
+    const tracks = getPracticeTracks(sourceMidi)
+
+    if (!tracks) {
+      return
+    }
+
+    const events = createPracticeEvents(
+      sourceMidi.notes.filter((note) => note.track === tracks.upper),
+    )
+    if (demonstrationPiece !== 'prelude') {
+      return
+    }
+
+    const octaveLevels = choosePracticeOctaveLevels(
+      events,
+      piece.defaultOctaveLevels.upper,
+    )
+    const eventIndex = events.findLastIndex(
+      (event) => event.start <= currentTime + 0.0001,
+    )
+
+    if (eventIndex >= 0) {
+      applyKeyboardOctave(
+        octaveLevels[eventIndex] ?? piece.defaultOctaveLevels.upper,
+      )
+    }
+  }, [applyKeyboardOctave, currentTime, demonstrationPiece, sourceMidi])
+
   useEffect(() => {
     const transport = transportRef.current
 
     if (!midi || isPlaying || isPreparing) {
       transport?.releaseKeyboardNotes()
+      heldKeyboardPitchesRef.current.clear()
+      practiceMatchedPitchesRef.current.clear()
       setPressedKeyboardPitches(new Set())
       setPressedKeyboardCodes(new Set())
       return
@@ -258,6 +790,8 @@ function App() {
 
     const releaseAll = () => {
       transport?.releaseKeyboardNotes()
+      heldKeyboardPitchesRef.current.clear()
+      practiceMatchedPitchesRef.current.clear()
       setPressedKeyboardPitches(new Set())
       setPressedKeyboardCodes(new Set())
     }
@@ -272,6 +806,35 @@ function App() {
         return
       }
 
+      const activeOctaveLevel = keyboardOctaveLevelRef.current
+
+      const octaveStep = keyboardOctaveStepForCode(event.code)
+
+      if (octaveStep !== undefined) {
+        event.preventDefault()
+
+        if (event.repeat) {
+          return
+        }
+
+        if (practiceRef.current) {
+          return
+        }
+
+        const nextOctaveLevel = clampKeyboardOctaveLevel(
+          activeOctaveLevel + octaveStep,
+        )
+
+        if (nextOctaveLevel !== activeOctaveLevel) {
+          releaseAll()
+          keyboardOctaveLevelRef.current = nextOctaveLevel
+          setKeyboardOctaveLevel(nextOctaveLevel)
+          void transport?.prepareKeyboardOctave(nextOctaveLevel)
+        }
+
+        return
+      }
+
       const octaveLevel = keyboardOctaveLevelForCode(event.code)
 
       if (octaveLevel !== undefined) {
@@ -281,8 +844,13 @@ function App() {
           return
         }
 
-        if (octaveLevel !== keyboardOctaveLevel) {
+        if (practiceRef.current) {
+          return
+        }
+
+        if (octaveLevel !== activeOctaveLevel) {
           releaseAll()
+          keyboardOctaveLevelRef.current = octaveLevel
           setKeyboardOctaveLevel(octaveLevel)
           void transport?.prepareKeyboardOctave(octaveLevel)
         }
@@ -290,7 +858,7 @@ function App() {
         return
       }
 
-      const pitch = keyboardPitchForCode(event.code, keyboardOctaveLevel)
+      const pitch = keyboardPitchForCode(event.code, activeOctaveLevel)
 
       if (pitch === undefined) {
         return
@@ -302,6 +870,24 @@ function App() {
         return
       }
 
+      const activePractice = practiceRef.current
+
+      if (
+        activePractice?.piece === 'prelude' &&
+        duetTwoLeadInRef.current
+      ) {
+        return
+      }
+
+      heldKeyboardPitchesRef.current.add(pitch)
+
+      if (activePractice?.status === 'waiting') {
+        const activeEvent = activePractice.events[activePractice.gateIndex]
+
+        if (activeEvent?.notes.some((note) => note.pitch === pitch)) {
+          practiceMatchedPitchesRef.current.add(pitch)
+        }
+      }
       setPressedKeyboardPitches((current) => {
         if (current.has(pitch)) {
           return current
@@ -316,11 +902,15 @@ function App() {
 
         return new Set(current).add(event.code)
       })
-      void transport?.previewKeyDown(pitch, keyboardOctaveLevel)
+      void transport?.previewKeyDown(pitch, activeOctaveLevel)
+      advancePractice()
     }
 
     const handleKeyUp = (event: KeyboardEvent) => {
-      const pitch = keyboardPitchForCode(event.code, keyboardOctaveLevel)
+      const pitch = keyboardPitchForCode(
+        event.code,
+        keyboardOctaveLevelRef.current,
+      )
 
       if (pitch === undefined) {
         return
@@ -328,6 +918,7 @@ function App() {
 
       event.preventDefault()
       transport?.previewKeyUp(pitch)
+      heldKeyboardPitchesRef.current.delete(pitch)
       setPressedKeyboardPitches((current) => {
         if (!current.has(pitch)) {
           return current
@@ -365,8 +956,10 @@ function App() {
       window.removeEventListener('blur', releaseAll)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       transport?.releaseKeyboardNotes()
+      heldKeyboardPitchesRef.current.clear()
+      practiceMatchedPitchesRef.current.clear()
     }
-  }, [isPlaying, isPreparing, keyboardOctaveLevel, midi])
+  }, [advancePractice, isPlaying, isPreparing, keyboardOctaveLevel, midi])
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -431,19 +1024,258 @@ function App() {
     }
   }, [loadParsedMidi])
 
-  const handlePlay = useCallback(async () => {
-    const transport = transportRef.current
+  const handleGameButton = useCallback((pieceId: PracticePieceId) => {
+    if (practiceRef.current) {
+      clearPracticeSession()
+      setCurrentTime(0)
+      setIsPreparing(false)
+      setIsOverview(false)
+      return
+    }
 
-    if (!midi || !transport || isPreparing) {
+    setError(null)
+    setActiveGameMenu((current) => (current === pieceId ? null : pieceId))
+  }, [clearPracticeSession])
+
+  const handleStartGame = useCallback(
+    async (
+      pieceId: PracticePieceId,
+      voice: PracticeVoice,
+      parsedOverride?: ParsedMidi,
+    ) => {
+      const piece = practicePieces[pieceId]
+      const parsed = parsedOverride ?? sourceMidi
+      const transport = transportRef.current
+
+      if (
+        !parsed ||
+        !transport ||
+        (!parsedOverride && sourceKind !== 'midi') ||
+        practicePieceForFileName(parsed.fileName)?.id !== piece.id ||
+        (!parsedOverride && isPreparing)
+      ) {
+        return
+      }
+
+      const tracks = getPracticeTracks(parsed)
+
+      if (!tracks) {
+        setError(`${piece.label} requires a two-voice MIDI file.`)
+        return
+      }
+
+      setDemonstrationPiece(null)
+
+      const playerTrack = voice === 'upper' ? tracks.upper : tracks.lower
+      const companionTrack = voice === 'upper' ? tracks.lower : tracks.upper
+      const events = createPracticeEvents(
+        parsed.notes.filter((note) => note.track === playerTrack),
+      )
+      const initialOctaveLevel = piece.defaultOctaveLevels[voice]
+      const fixedOctaveLevel = piece.automaticallySwitchOctaves
+        ? null
+        : initialOctaveLevel
+      const octaveLevels = piece.automaticallySwitchOctaves
+        ? choosePracticeOctaveLevels(events, initialOctaveLevel)
+        : []
+
+      if (events.length === 0) {
+        setError('No playable notes were found for this voice.')
+        return
+      }
+
+      const firstEvent = events[0]
+      const needsDuetTwoLeadIn =
+        piece.id === 'prelude' && firstEvent !== undefined && firstEvent.start > 0
+      const runId = ++practiceRunIdRef.current
+      const nextVisibleTracks = new Set(parsed.tracks.map((track) => track.track))
+      const nextOctaveLevel = octaveLevels[0] ?? initialOctaveLevel
+      const session: PracticeSession = {
+        runId,
+        piece: piece.id,
+        voice,
+        events,
+        fixedOctaveLevel,
+        octaveLevels,
+        companionNotes: parsed.notes.filter(
+          (note) => note.track === companionTrack,
+        ),
+        duration: parsed.duration,
+        gateIndex: 0,
+        status: 'preparing',
+      }
+
+      if (practiceFrameRef.current !== null) {
+        window.cancelAnimationFrame(practiceFrameRef.current)
+        practiceFrameRef.current = null
+      }
+
+      playRequestIdRef.current += 1
+      transport.stop()
+      transport.load(parsed.notes, parsed.duration, nextVisibleTracks)
+      transport.setVisibleTracks(nextVisibleTracks)
+      practiceRef.current = session
+      heldKeyboardPitchesRef.current.clear()
+      practiceMatchedPitchesRef.current.clear()
+      setPracticeSession(session)
+      setActiveGameMenu(null)
+      setError(null)
+      setTransposeSemitones(0)
+      setReversePlayback(false)
+      setVisibleTracks(nextVisibleTracks)
+      setCurrentTime(needsDuetTwoLeadIn ? 0 : (firstEvent?.start ?? 0))
+      setIsPlaying(false)
+      setIsPreparing(true)
+      setIsOverview(false)
+      setKeyName(null)
+      keyboardOctaveLevelRef.current = nextOctaveLevel
+      setKeyboardOctaveLevel(nextOctaveLevel)
+      setPressedKeyboardPitches(new Set())
+      setPressedKeyboardCodes(new Set())
+
+      try {
+        await Promise.all([
+          transport.preparePractice(),
+          piece.automaticallySwitchOctaves
+            ? transport.prepareKeyboardOctaves(octaveLevels)
+            : transport.prepareKeyboardOctave(nextOctaveLevel),
+        ])
+
+        if (practiceRef.current?.runId !== runId) {
+          return
+        }
+
+        if (needsDuetTwoLeadIn && firstEvent) {
+          duetTwoLeadInRef.current = true
+          setIsDuetTwoLeadIn(true)
+          await transport.playPracticeNotes(
+            session.companionNotes,
+            0,
+            firstEvent.start,
+          )
+
+          if (practiceRef.current?.runId !== runId) {
+            return
+          }
+
+          const startedAt = performance.now()
+          const durationMs = Math.max(
+            1,
+            (firstEvent.start / playbackRate) * 1000,
+          )
+
+          const advanceDuetTwoLeadIn = (now: number) => {
+            if (
+              practiceRef.current?.runId !== runId ||
+              !duetTwoLeadInRef.current
+            ) {
+              return
+            }
+
+            const progress = Math.min(
+              Math.max((now - startedAt) / durationMs, 0),
+              1,
+            )
+            const nextTime = firstEvent.start * progress
+            currentTimeRef.current = nextTime
+
+            if (
+              progress >= 1 ||
+              now - lastPracticeUiUpdateRef.current >= 100
+            ) {
+              lastPracticeUiUpdateRef.current = now
+              setCurrentTime(nextTime)
+            }
+
+            if (progress < 1) {
+              duetTwoLeadInFrameRef.current = window.requestAnimationFrame(
+                advanceDuetTwoLeadIn,
+              )
+              return
+            }
+
+            duetTwoLeadInFrameRef.current = null
+            duetTwoLeadInRef.current = false
+            setIsDuetTwoLeadIn(false)
+            const readySession: PracticeSession = {
+              ...session,
+              status: 'waiting',
+            }
+            practiceRef.current = readySession
+            setPracticeSession(readySession)
+          }
+
+          currentTimeRef.current = 0
+          lastPracticeUiUpdateRef.current = startedAt
+          duetTwoLeadInFrameRef.current = window.requestAnimationFrame(
+            advanceDuetTwoLeadIn,
+          )
+          return
+        }
+
+        const readySession: PracticeSession = {
+          ...session,
+          status: 'waiting',
+        }
+
+        practiceRef.current = readySession
+        setPracticeSession(readySession)
+      } catch (caughtError) {
+        if (practiceRef.current?.runId === runId) {
+          transport.stop()
+          practiceRef.current = null
+          setPracticeSession(null)
+          setError(
+            caughtError instanceof Error
+              ? caughtError.message
+              : 'Could not start Duet.',
+          )
+        }
+      } finally {
+        if (!practiceRef.current || practiceRef.current.runId === runId) {
+          setIsPreparing(false)
+        }
+      }
+    },
+    [isPreparing, playbackRate, sourceKind, sourceMidi],
+  )
+
+  const handlePlay = useCallback(async (
+    forcedStartAt?: number,
+    midiOverride?: ParsedMidi,
+  ) => {
+    const transport = transportRef.current
+    const playableMidi = midiOverride ?? midi
+
+    if (
+      !playableMidi ||
+      !transport ||
+      (!midiOverride && isPreparing) ||
+      practiceRef.current
+    ) {
       return
     }
 
     const startAt =
-      isOverview || currentTime >= midi.duration
-        ? 0
-        : currentTime
+      forcedStartAt ??
+      (isOverview || currentTime >= playableMidi.duration ? 0 : currentTime)
 
     const requestId = ++playRequestIdRef.current
+    const nextVisibleTracks = new Set(
+      playableMidi.tracks.map((track) => track.track),
+    )
+
+    if (midiOverride) {
+      transport.stop()
+      transport.load(
+        playableMidi.notes,
+        playableMidi.duration,
+        nextVisibleTracks,
+      )
+      transport.setVisibleTracks(nextVisibleTracks)
+      setVisibleTracks(nextVisibleTracks)
+    }
+
     setIsPreparing(true)
     setIsOverview(false)
     setKeyName(null)
@@ -473,8 +1305,123 @@ function App() {
     }
   }, [currentTime, isOverview, isPreparing, midi])
 
+  const handleStartDemonstration = useCallback((
+    pieceId: PracticePieceId,
+    parsed?: ParsedMidi,
+  ) => {
+    const piece = practicePieces[pieceId]
+    const demonstrationMidi = parsed ?? sourceMidi
+    const tracks = demonstrationMidi ? getPracticeTracks(demonstrationMidi) : null
+    const events = tracks && demonstrationMidi
+      ? createPracticeEvents(
+          demonstrationMidi.notes.filter((note) => note.track === tracks.upper),
+        )
+      : []
+    const octaveLevels = piece.automaticallySwitchOctaves
+      ? choosePracticeOctaveLevels(events, piece.defaultOctaveLevels.upper)
+      : []
+    const nextOctaveLevel = piece.automaticallySwitchOctaves
+      ? (octaveLevels[0] ?? piece.defaultOctaveLevels.upper)
+      : piece.defaultOctaveLevels.upper
+
+    setActiveGameMenu(null)
+    setDemonstrationPiece(piece.id)
+    keyboardOctaveLevelRef.current = nextOctaveLevel
+    setKeyboardOctaveLevel(nextOctaveLevel)
+    void (piece.automaticallySwitchOctaves
+      ? transportRef.current?.prepareKeyboardOctaves(octaveLevels)
+      : transportRef.current?.prepareKeyboardOctave(nextOctaveLevel))
+    void handlePlay(0, parsed)
+  }, [handlePlay, sourceMidi])
+
+  const handleDuetChoice = useCallback(
+    async (pieceId: PracticePieceId, mode: DuetMode) => {
+      if (isPreparing) {
+        return
+      }
+
+      const piece = practicePieces[pieceId]
+      setActiveGameMenu(null)
+      const currentPiece =
+        sourceKind === 'midi' &&
+        sourceMidi &&
+        practicePieceForFileName(sourceMidi.fileName)?.id === piece.id
+
+      if (currentPiece) {
+        if (mode === 'demonstration') {
+          handleStartDemonstration(piece.id)
+        } else {
+          void handleStartGame(piece.id, mode)
+        }
+        return
+      }
+
+      setError(null)
+      setIsPreparing(true)
+      const requestId = ++loadRequestIdRef.current
+      let startedMode = false
+
+      try {
+        const response = await fetch(
+          `${import.meta.env.BASE_URL}${piece.fileName}`,
+        )
+
+        if (!response.ok) {
+          throw new Error(`Could not load ${piece.fileName}.`)
+        }
+
+        const parsed = await parseMidi(
+          piece.fileName,
+          await response.arrayBuffer(),
+        )
+
+        if (requestId !== loadRequestIdRef.current) {
+          return
+        }
+
+        loadParsedMidi(parsed, 'midi')
+
+        if (mode === 'demonstration') {
+          startedMode = true
+          handleStartDemonstration(piece.id, parsed)
+        } else {
+          startedMode = true
+          void handleStartGame(piece.id, mode, parsed)
+        }
+      } catch (caughtError) {
+        if (requestId === loadRequestIdRef.current) {
+          setError(
+              caughtError instanceof Error
+              ? caughtError.message
+              : `Could not load ${piece.fileName}.`,
+          )
+        }
+      } finally {
+        if (requestId === loadRequestIdRef.current && !startedMode) {
+          setIsPreparing(false)
+        }
+      }
+    },
+    [
+      handleStartDemonstration,
+      handleStartGame,
+      isPreparing,
+      loadParsedMidi,
+      sourceKind,
+      sourceMidi,
+    ],
+  )
+
   const handlePause = useCallback(() => {
     const transport = transportRef.current
+
+    if (practiceRef.current) {
+      clearPracticeSession()
+      setCurrentTime(0)
+      setIsPreparing(false)
+      setIsOverview(false)
+      return
+    }
 
     if (!transport) {
       return
@@ -485,31 +1432,49 @@ function App() {
     setCurrentTime(transport.getCurrentTime())
     setIsPlaying(false)
     setIsPreparing(false)
-  }, [])
+  }, [clearPracticeSession])
 
   const handleStop = useCallback(() => {
+    if (practiceRef.current) {
+      clearPracticeSession()
+      setCurrentTime(0)
+      setIsPlaying(false)
+      setIsPreparing(false)
+      setIsOverview(false)
+      return
+    }
+
     playRequestIdRef.current += 1
     transportRef.current?.stop()
     setCurrentTime(0)
     setIsPlaying(false)
     setIsPreparing(false)
     setIsOverview(false)
-  }, [])
+    setDemonstrationPiece(null)
+  }, [clearPracticeSession])
 
   const handleSeek = useCallback((time: number) => {
+    if (practiceRef.current) {
+      return
+    }
+
     transportRef.current?.seek(time)
     setCurrentTime(time)
     setIsOverview(false)
   }, [])
 
   const handlePlaybackRateChange = useCallback((rate: PlaybackRate) => {
+    if (practiceRef.current?.status === 'running') {
+      return
+    }
+
     const nextRate = normalizePlaybackRate(rate)
     setPlaybackRate(nextRate)
     transportRef.current?.setPlaybackRate(nextRate)
   }, [])
 
   const handleToggleReversePlayback = useCallback(() => {
-    if (!sourceMidi || isPlaying || isPreparing) {
+    if (!sourceMidi || isPlaying || isPreparing || practiceRef.current) {
       return
     }
 
@@ -546,6 +1511,10 @@ function App() {
         return
       }
 
+      if (practiceRef.current) {
+        return
+      }
+
       const transposed = transposeMidi(sourceMidi, nextTranspose)
       const nextMidi = reversePlayback ? reverseMidi(transposed) : transposed
       const transport = transportRef.current
@@ -579,6 +1548,10 @@ function App() {
   )
 
   const handleToggleTrack = useCallback((track: number) => {
+    if (practiceRef.current) {
+      return
+    }
+
     setVisibleTracks((previous) => {
       const next = new Set(previous)
 
@@ -608,7 +1581,7 @@ function App() {
   }, [])
 
   const handleToggleKeyAnalysis = useCallback(() => {
-    if (!midi || isPlaying || isPreparing) {
+    if (!midi || isPlaying || isPreparing || practiceRef.current) {
       return
     }
 
@@ -622,12 +1595,80 @@ function App() {
   }, [currentTime, isPlaying, isPreparing, midi])
 
   const getTransportTime = useCallback(() => {
+    if (
+      practiceRef.current?.status === 'running' ||
+      duetTwoLeadInRef.current
+    ) {
+      return currentTimeRef.current
+    }
+
     return transportRef.current?.getCurrentTime() ?? 0
   }, [])
 
   return (
     <main className={isZen ? 'app-shell is-zen' : 'app-shell'} ref={appRef}>
       <header className="topbar">
+        <div className="game-controls">
+          {Object.values(practicePieces).map((piece) => (
+            <div className="game-control" key={piece.id}>
+              <button
+                className={
+                  practiceSession?.piece === piece.id ||
+                  demonstrationPiece === piece.id ||
+                  activeGameMenu === piece.id
+                    ? 'game-button is-active'
+                    : 'game-button'
+                }
+                type="button"
+                title={
+                  practiceSession?.piece === piece.id
+                    ? `End ${piece.label}`
+                    : `Play ${piece.fileName}`
+                }
+                aria-label={
+                  practiceSession?.piece === piece.id
+                    ? `End ${piece.label}`
+                    : `Play ${piece.fileName}`
+                }
+                onClick={() => handleGameButton(piece.id)}
+              >
+                {piece.label}
+              </button>
+              {activeGameMenu === piece.id ? (
+                <div className="game-menu" role="menu" aria-label={`${piece.label} voice`}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      void handleDuetChoice(piece.id, 'upper')
+                    }}
+                  >
+                    Upper Voice
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      void handleDuetChoice(piece.id, 'lower')
+                    }}
+                  >
+                    Lower Voice
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      void handleDuetChoice(piece.id, 'demonstration')
+                    }}
+                  >
+                    Demonstration
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+        <div className="topbar__sources">
         <MidiDropzone
           accept=".mid,.midi"
           defaultFileName={defaultMidiFileName}
@@ -662,12 +1703,13 @@ function App() {
             void loadDefaultCsv()
           }}
         />
+        </div>
       </header>
 
       <CanvasView
             midi={midi}
             currentTime={currentTime}
-            isPlaying={isPlaying}
+            isAnimating={isPlaying || isPracticeAnimating}
             isOverview={isOverview}
             getCurrentTime={getTransportTime}
             visibleTracks={visibleTracks}
@@ -681,14 +1723,20 @@ function App() {
             highlightedPitches={pressedKeyboardPitches}
             keyboardOctaveLevel={keyboardOctaveLevel}
             pressedKeyboardCodes={pressedKeyboardCodes}
-            keyboardEnabled={Boolean(midi) && !isPlaying && !isPreparing}
+            keyboardIndexVisible={
+              Boolean(midi) && (!isPlaying || isDemonstration) && !isPreparing
+            }
             keyName={keyName}
       />
 
       {error ? <p className="error-line">{error}</p> : null}
 
-      <Controls
+      <div className="controls-anchor" ref={controlsAnchorRef}>
+        <Controls
             disabled={!midi}
+            practiceActive={Boolean(practiceSession)}
+            demonstrationActive={isDemonstration}
+            practiceRateLocked={isPracticeAnimating}
             isPlaying={isPlaying}
             isPreparing={isPreparing}
             keyAnalysisVisible={Boolean(keyName)}
@@ -734,7 +1782,14 @@ function App() {
             onToggleKeyAnalysis={handleToggleKeyAnalysis}
             onToggleTrack={handleToggleTrack}
             onToggleZen={handleToggleZen}
-      />
+        />
+        {activeSequence && practiceSequencePosition ? (
+          <PracticeSequence
+            sequence={activeSequence}
+            position={practiceSequencePosition}
+          />
+        ) : null}
+      </div>
     </main>
   )
 }
