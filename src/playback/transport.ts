@@ -22,6 +22,7 @@ export type SoundPreset =
 interface Voice {
   sources: AudioScheduledSourceNode[]
   gains: GainNode[]
+  endAt: number
 }
 
 type KeyboardVoice =
@@ -53,6 +54,7 @@ const SMALL_PIANO_PRESET_GAIN = 1.25
 const GRAND_PIANO_LOOKAHEAD_SECONDS = 0.72
 const GRAND_PIANO_FILTER_FREQUENCY = 6800
 const KEYBOARD_NOTE_VELOCITY = 0.76
+const PRACTICE_HOLD_MAX_SECONDS = 60
 export const DEFAULT_VOLUME = 0.85
 export const MAX_VOLUME = 2
 const PIANO_BASE_VOLUME = {
@@ -198,6 +200,10 @@ export class MidiTransport {
 
   private activeVoices: Voice[] = []
 
+  private practiceTailVoices = new Map<Voice, number>()
+
+  private practicePianoPedalDown = false
+
   private keyboardHeldPitches = new Set<number>()
 
   private keyboardVoices = new Map<number, KeyboardVoice>()
@@ -312,6 +318,7 @@ export class MidiTransport {
     startAt: number,
     endAt: number,
   ) {
+    this.resumePracticeSustain()
     await this.preparePractice()
 
     if (this.soundPreset === 'grandPiano') {
@@ -330,6 +337,44 @@ export class MidiTransport {
       if (note.start >= startAt && note.start < endAt) {
         this.scheduleNote(note, startAt, audioStart)
       }
+    })
+  }
+
+  holdPracticeTail() {
+    const context = this.context
+
+    if (!context) {
+      return
+    }
+
+    const now = context.currentTime
+    const holdUntil = now + PRACTICE_HOLD_MAX_SECONDS
+
+    if (this.soundPreset === 'grandPiano' && this.piano?.loaded) {
+      this.piano.pedalDown({ time: toneNow() })
+      this.practicePianoPedalDown = true
+    }
+
+    this.activeVoices.forEach((voice) => {
+      const remainingDuration = voice.endAt - now
+
+      if (remainingDuration <= 0.015) {
+        return
+      }
+
+      voice.gains.forEach((gain) => {
+        const parameter = gain.gain
+
+        parameter.cancelAndHoldAtTime(now)
+      })
+
+      voice.sources.forEach((source) => {
+        try {
+          source.stop(holdUntil)
+        } catch {}
+      })
+
+      this.practiceTailVoices.set(voice, remainingDuration)
     })
   }
 
@@ -1267,7 +1312,7 @@ export class MidiTransport {
     source.start(startAt)
     source.stop(stopAt + 0.03)
 
-    const voice = { sources: [source], gains: [gain] }
+    const voice = { sources: [source], gains: [gain], endAt: stopAt }
     this.activeVoices.push(voice)
     source.onended = () => {
       this.cleanupVoice(voice)
@@ -1335,7 +1380,13 @@ export class MidiTransport {
       gains.push(gain)
     })
 
-    const voice = { sources, gains }
+    const voice = {
+      sources,
+      gains,
+      endAt: startAt + Math.max(...partials.map((partial) =>
+        profile.decay * partial.decay,
+      )),
+    }
     this.activeVoices.push(voice)
     sources[0]?.addEventListener('ended', () => {
       filter.disconnect()
@@ -1380,7 +1431,7 @@ export class MidiTransport {
         source.start(startAt)
         source.stop(stopAt + 0.03)
 
-        const voice = { sources: [source], gains: [gain] }
+        const voice = { sources: [source], gains: [gain], endAt: stopAt }
         this.activeVoices.push(voice)
         source.onended = () => {
           this.cleanupVoice(voice)
@@ -1462,7 +1513,7 @@ export class MidiTransport {
     oscillators.push(click)
     gains.push(clickGain)
 
-    const voice = { sources: oscillators, gains }
+    const voice = { sources: oscillators, gains, endAt: stopAt }
     this.activeVoices.push(voice)
 
     oscillators[0].onended = () => {
@@ -1504,6 +1555,48 @@ export class MidiTransport {
     })
   }
 
+  private resumePracticeSustain() {
+    this.releasePracticePianoPedal()
+    const context = this.context
+
+    if (context) {
+      const now = context.currentTime
+
+      this.practiceTailVoices.forEach((remainingDuration, voice) => {
+        const endAt = now + Math.max(remainingDuration, 0.04)
+
+        voice.gains.forEach((gain) => {
+          const parameter = gain.gain
+
+          parameter.cancelAndHoldAtTime(now)
+          parameter.exponentialRampToValueAtTime(0.0001, endAt)
+        })
+
+        voice.sources.forEach((source) => {
+          try {
+            source.stop(endAt + 0.03)
+          } catch {}
+        })
+      })
+    }
+
+    this.practiceTailVoices.clear()
+  }
+
+  private clearPracticeSustain() {
+    this.releasePracticePianoPedal()
+    this.practiceTailVoices.clear()
+  }
+
+  private releasePracticePianoPedal() {
+    if (!this.practicePianoPedalDown) {
+      return
+    }
+
+    this.piano?.pedalUp({ time: toneNow() })
+    this.practicePianoPedalDown = false
+  }
+
   private clearScheduler() {
     if (this.schedulerId === null) {
       return
@@ -1525,6 +1618,7 @@ export class MidiTransport {
   private stopActiveVoices() {
     const contextTime = this.context?.currentTime ?? 0
 
+    this.clearPracticeSustain()
     this.releaseKeyboardNotes()
 
     this.closePianoOutput()

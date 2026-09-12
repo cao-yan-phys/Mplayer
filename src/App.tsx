@@ -444,16 +444,22 @@ function App() {
     setPressedKeyboardCodes(new Set())
   }, [])
 
-  const loadParsedMidi = useCallback((parsed: ParsedMidi, kind: SourceKind) => {
+  const loadParsedMidi = useCallback((
+    parsed: ParsedMidi,
+    kind: SourceKind,
+    options: { preloadKeyboard?: boolean } = {},
+  ) => {
     playRequestIdRef.current += 1
     clearPracticeSession()
     const nextVisibleTracks = new Set(parsed.tracks.map((track) => track.track))
 
     transportRef.current?.load(parsed.notes, parsed.duration, nextVisibleTracks)
     transportRef.current?.preloadCurrentSound()
-    void transportRef.current?.prepareKeyboardOctave(
-      DEFAULT_KEYBOARD_OCTAVE_LEVEL,
-    )
+    if (options.preloadKeyboard !== false) {
+      void transportRef.current?.prepareKeyboardOctave(
+        DEFAULT_KEYBOARD_OCTAVE_LEVEL,
+      )
+    }
     setError(null)
     setSourceMidi(parsed)
     setSourceKind(kind)
@@ -693,6 +699,10 @@ function App() {
 
         if (!activeSession) {
           return
+        }
+
+        if (nextEvent) {
+          transport.holdPracticeTail()
         }
 
         const nextSession: PracticeSession = nextEvent
@@ -1197,6 +1207,7 @@ function App() {
             duetTwoLeadInFrameRef.current = null
             duetTwoLeadInRef.current = false
             setIsDuetTwoLeadIn(false)
+            transport.holdPracticeTail()
             const readySession: PracticeSession = {
               ...session,
               status: 'waiting',
@@ -1328,9 +1339,6 @@ function App() {
     setDemonstrationPiece(piece.id)
     keyboardOctaveLevelRef.current = nextOctaveLevel
     setKeyboardOctaveLevel(nextOctaveLevel)
-    void (piece.automaticallySwitchOctaves
-      ? transportRef.current?.prepareKeyboardOctaves(octaveLevels)
-      : transportRef.current?.prepareKeyboardOctave(nextOctaveLevel))
     void handlePlay(0, parsed)
   }, [handlePlay, sourceMidi])
 
@@ -1379,7 +1387,9 @@ function App() {
           return
         }
 
-        loadParsedMidi(parsed, 'midi')
+        loadParsedMidi(parsed, 'midi', {
+          preloadKeyboard: mode !== 'demonstration',
+        })
 
         if (mode === 'demonstration') {
           startedMode = true
