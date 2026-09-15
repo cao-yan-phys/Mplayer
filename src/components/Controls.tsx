@@ -95,6 +95,14 @@ const formatPlaybackRate = (playbackRate: PlaybackRate) => {
     return '2/3 ×'
   }
 
+  if (playbackRate === 0.75) {
+    return '3/4 ×'
+  }
+
+  if (playbackRate === 1.3333333333333333) {
+    return '4/3 ×'
+  }
+
   if (playbackRate === 1.5) {
     return '3/2 ×'
   }
@@ -340,7 +348,7 @@ export function Controls({
             max={Math.max(duration, 0.01)}
             step={0.01}
             value={Math.min(currentTime, duration)}
-            disabled={controlsLocked}
+            disabled={disabled || practiceActive || isPreparing}
             aria-label="Playback progress"
             onChange={(event) => onSeek(Number(event.currentTarget.value))}
           />

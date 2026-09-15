@@ -1,7 +1,13 @@
 import type { MidiNote, ParsedMidi } from '../midi/noteTypes'
 import { keyboardBindingsForOctaveLevel } from './keyboardMap'
 
-export type PracticeVoice = 'upper' | 'lower'
+export type PracticeVoice =
+  | 'upper'
+  | 'lower'
+  | 'sound1'
+  | 'sound2'
+  | 'sound3'
+  | 'sound4'
 
 export interface PracticeEvent {
   start: number
@@ -40,6 +46,27 @@ export const getPracticeTracks = (
   )
   const lower = byPitch[0]
   const upper = byPitch[1]
+
+  return lower && upper
+    ? {
+        lower: lower.track,
+        upper: upper.track,
+      }
+    : null
+}
+
+export const getOuterPracticeTracks = (
+  midi: ParsedMidi,
+): PracticeTracks | null => {
+  if (midi.tracks.length !== 4) {
+    return null
+  }
+
+  const byPitch = [...midi.tracks].sort(
+    (left, right) => left.averagePitch - right.averagePitch,
+  )
+  const lower = byPitch[0]
+  const upper = byPitch.at(-1)
 
   return lower && upper
     ? {

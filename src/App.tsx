@@ -11,6 +11,7 @@ import { Controls } from './components/Controls'
 import { MidiDropzone } from './components/MidiDropzone'
 import { findMotifGroups } from './midi/motifAnalysis'
 import { analyzeLocalKey } from './midi/keyAnalysis'
+import { findContrapunctusSubjectTraces } from './midi/contrapunctusSubjects'
 import {
   DEFAULT_KEYBOARD_OCTAVE_LEVEL,
   clampKeyboardOctaveLevel,
@@ -30,12 +31,14 @@ import {
   DEFAULT_VOLUME,
   normalizePlaybackRate,
   MidiTransport,
+  type TrackSoundOverride,
   type PlaybackRate,
   type SoundPreset,
 } from './playback/transport'
 import {
   choosePracticeOctaveLevels,
   createPracticeEvents,
+  getOuterPracticeTracks,
   getPracticeTracks,
   type PracticeEvent,
   type PracticeVoice,
@@ -43,11 +46,15 @@ import {
 
 const defaultMidiFileName = 'BWV862_prelude.mid'
 const defaultMidiUrl = `${import.meta.env.BASE_URL}${defaultMidiFileName}`
-const ariaMidiFileName = 'BWV988_Aria.mid'
+const ariaMidiFileName = 'BWV988_aria.mid'
 const preludeMidiFileName = 'BWV846_prelude.mid'
+const contrapunctusMidiFileName = 'BWV1080_14.mid'
 const defaultCsvFileName = 'sxs_bbh_0001_i60_phi0_ell8.csv'
 const defaultCsvUrl = `${import.meta.env.BASE_URL}${defaultCsvFileName}`
 const PRACTICE_SEQUENCE_LENGTH = 10
+const PRACTICE_QUICK_INTERVAL_SECONDS = 0.3
+const CONTRAPUNCTUS_PLAYBACK_GAIN = 0.55
+const BACH_CUTOFF_SECONDS = 478
 
 type SourceKind = 'midi' | 'csv'
 
@@ -55,14 +62,15 @@ type PracticeStatus = 'preparing' | 'waiting' | 'running' | 'complete'
 
 type DuetMode = PracticeVoice | 'demonstration'
 
-type PracticePieceId = 'aria' | 'prelude'
+type PracticePieceId = 'aria' | 'prelude' | 'contrapunctus'
 
 interface PracticePiece {
   id: PracticePieceId
   label: string
   fileName: string
-  defaultOctaveLevels: Record<PracticeVoice, number>
+  defaultOctaveLevels: Partial<Record<PracticeVoice, number>>
   automaticallySwitchOctaves: boolean
+  trackLayout: 'pair' | 'all'
 }
 
 const practicePieces: Record<PracticePieceId, PracticePiece> = {
@@ -72,6 +80,7 @@ const practicePieces: Record<PracticePieceId, PracticePiece> = {
     fileName: ariaMidiFileName,
     defaultOctaveLevels: { upper: 5, lower: 3 },
     automaticallySwitchOctaves: false,
+    trackLayout: 'pair',
   },
   prelude: {
     id: 'prelude',
@@ -79,6 +88,15 @@ const practicePieces: Record<PracticePieceId, PracticePiece> = {
     fileName: preludeMidiFileName,
     defaultOctaveLevels: { upper: 4, lower: 3 },
     automaticallySwitchOctaves: true,
+    trackLayout: 'pair',
+  },
+  contrapunctus: {
+    id: 'contrapunctus',
+    label: 'Duet 3',
+    fileName: contrapunctusMidiFileName,
+    defaultOctaveLevels: { sound1: 5, sound2: 4, sound3: 3, sound4: 3 },
+    automaticallySwitchOctaves: true,
+    trackLayout: 'all',
   },
 }
 
@@ -97,9 +115,11 @@ interface PracticeSession {
 
 interface PracticeSequenceData {
   lineStart: number
+  timingProgress: number | null
   items: Array<{
     isCompleted: boolean
     isCurrent: boolean
+    isQuick: boolean
     notes: Array<{
       keyLabel: string
     }>
@@ -117,6 +137,54 @@ const practicePieceForFileName = (fileName: string) =>
   Object.values(practicePieces).find(
     (piece) => piece.fileName.toLowerCase() === fileName.toLowerCase(),
   )
+
+const trackSoundOverridesForMidi = (_midi: ParsedMidi) =>
+  new Map<number, TrackSoundOverride>()
+
+const practiceTracksForPiece = (
+  piece: PracticePiece,
+  midi: ParsedMidi,
+) =>
+  piece.trackLayout === 'all'
+    ? getOuterPracticeTracks(midi)
+    : getPracticeTracks(midi)
+
+const trackForPracticeVoice = (
+  piece: PracticePiece,
+  midi: ParsedMidi,
+  voice: PracticeVoice,
+  tracks: { upper: number; lower: number },
+) => {
+  if (piece.trackLayout === 'pair') {
+    return voice === 'upper' ? tracks.upper : tracks.lower
+  }
+
+  const soundNumber = Number(voice.replace('sound', ''))
+
+  return midi.tracks.find((track) => track.name === `Sound ${soundNumber}`)?.track
+}
+
+const practiceVoiceOptions = (piece: PracticePiece): PracticeVoice[] =>
+  piece.trackLayout === 'all'
+    ? ['sound1', 'sound2', 'sound3', 'sound4']
+    : ['upper', 'lower']
+
+const practiceVoiceLabel = (voice: PracticeVoice) => {
+  if (voice === 'upper') {
+    return 'Upper Voice'
+  }
+
+  if (voice === 'lower') {
+    return 'Lower Voice'
+  }
+
+  return `Sound ${voice.at(-1)}`
+}
+
+const defaultOctaveLevelForVoice = (
+  piece: PracticePiece,
+  voice: PracticeVoice,
+) => piece.defaultOctaveLevels[voice] ?? DEFAULT_KEYBOARD_OCTAVE_LEVEL
 
 function PracticeSequence({
   sequence,
@@ -142,6 +210,7 @@ function PracticeSequence({
                 'practice-sequence__event',
                 event.isCompleted ? 'is-completed' : '',
                 event.isCurrent ? 'is-current' : '',
+                event.isQuick ? 'is-quick' : '',
               ]
                 .filter(Boolean)
                 .join(' ')
@@ -158,6 +227,14 @@ function PracticeSequence({
           </div>
         ))}
       </div>
+      {sequence.timingProgress !== null ? (
+        <div className="practice-sequence__timing" aria-hidden="true">
+          <div
+            className="practice-sequence__timing-fill"
+            style={{ width: `${sequence.timingProgress * 100}%` }}
+          />
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -259,6 +336,13 @@ function App() {
         : { axis: [], center: [] },
     [sourceKind, midi],
   )
+  const duetThreeSubjectTraces = useMemo(
+    () =>
+      demonstrationPiece === 'contrapunctus' && midi
+        ? findContrapunctusSubjectTraces(midi)
+        : [],
+    [demonstrationPiece, midi],
+  )
   const practiceSequence = useMemo<PracticeSequenceData | null>(() => {
     if (
       !practiceSession ||
@@ -282,14 +366,38 @@ function App() {
     const lineStart =
       Math.floor(nextEventIndex / PRACTICE_SEQUENCE_LENGTH) *
       PRACTICE_SEQUENCE_LENGTH
+    const currentEvent = practiceSession.events[practiceSession.gateIndex]
+    const nextEvent = practiceSession.events[practiceSession.gateIndex + 1]
+    const timingProgress =
+      practiceSession.status === 'running' && currentEvent && nextEvent
+        ? Math.min(
+            Math.max(
+              (currentTime - currentEvent.start) /
+                Math.max(nextEvent.start - currentEvent.start, 0.0001),
+              0,
+            ),
+            1,
+          )
+        : 1
 
     return {
       lineStart,
+      timingProgress,
       items: practiceSession.events
         .slice(lineStart, lineStart + PRACTICE_SEQUENCE_LENGTH)
         .map((event, index) => ({
           isCompleted: lineStart + index < nextEventIndex,
           isCurrent: lineStart + index === currentEventIndex,
+          isQuick:
+            event.notes.some(
+              (note) =>
+                note.duration / playbackRate < PRACTICE_QUICK_INTERVAL_SECONDS,
+            ) ||
+            (lineStart + index > 0 &&
+              (event.start -
+                practiceSession.events[lineStart + index - 1]!.start) /
+                playbackRate <
+                PRACTICE_QUICK_INTERVAL_SECONDS),
           notes: event.notes.map((note) => {
             const bindings = keyboardBindingsForOctaveLevel(
               practiceSession.fixedOctaveLevel ??
@@ -304,70 +412,9 @@ function App() {
           }),
         })),
     }
-  }, [keyboardOctaveLevel, practiceSession])
+  }, [currentTime, keyboardOctaveLevel, playbackRate, practiceSession])
 
-  const demonstrationSequence = useMemo<PracticeSequenceData | null>(() => {
-    const piece =
-      demonstrationPiece === null
-        ? undefined
-        : practicePieces[demonstrationPiece]
-
-    if (
-      !piece ||
-      !sourceMidi ||
-      practicePieceForFileName(sourceMidi.fileName)?.id !== piece.id
-    ) {
-      return null
-    }
-
-    const tracks = getPracticeTracks(sourceMidi)
-
-    if (!tracks) {
-      return null
-    }
-
-    const events = createPracticeEvents(
-      sourceMidi.notes.filter((note) => note.track === tracks.upper),
-    )
-    const octaveLevels = piece.automaticallySwitchOctaves
-      ? choosePracticeOctaveLevels(
-          events,
-          piece.defaultOctaveLevels.upper,
-        )
-      : events.map(() => piece.defaultOctaveLevels.upper)
-    const currentEventIndex = events.findLastIndex(
-      (event) => event.start <= currentTime + 0.0001,
-    )
-
-    if (currentEventIndex < 0) {
-      return null
-    }
-
-    const lineStart =
-      Math.floor(currentEventIndex / PRACTICE_SEQUENCE_LENGTH) *
-      PRACTICE_SEQUENCE_LENGTH
-
-    return {
-      lineStart,
-      items: events
-        .slice(lineStart, lineStart + PRACTICE_SEQUENCE_LENGTH)
-        .map((event, index) => ({
-          isCompleted: lineStart + index < currentEventIndex,
-          isCurrent: lineStart + index === currentEventIndex,
-          notes: event.notes.map((note) => {
-            const bindings = keyboardBindingsForOctaveLevel(
-              octaveLevels[lineStart + index] ??
-                piece.defaultOctaveLevels.upper,
-            )
-            const binding = bindings.find((item) => item.pitch === note.pitch)
-
-            return { keyLabel: binding?.label ?? '?' }
-          }),
-        })),
-    }
-  }, [currentTime, demonstrationPiece, sourceMidi])
-
-  const activeSequence = practiceSequence ?? demonstrationSequence
+  const activeSequence = practiceSequence
   const hasActiveSequence = activeSequence !== null
 
   useLayoutEffect(() => {
@@ -409,16 +456,45 @@ function App() {
     }
   }, [hasActiveSequence])
 
-  if (!transportRef.current) {
-    transportRef.current = new MidiTransport((endedAt) => {
+  const transportHasTrackSoundOverrides =
+    typeof (
+      transportRef.current as
+        | (MidiTransport & { setTrackSoundOverrides?: unknown })
+        | null
+    )?.setTrackSoundOverrides === 'function' &&
+    transportRef.current?.revision === 8
+
+  if (!transportHasTrackSoundOverrides) {
+    const transport = new MidiTransport((endedAt) => {
       setCurrentTime(endedAt)
       setIsPlaying(false)
       setIsOverview(true)
       setDemonstrationPiece(null)
     })
+
+    transportRef.current?.stop()
+    transport.setSoundPreset(soundPreset)
+    transport.setPlaybackRate(playbackRate)
+    transport.setVolume(volume)
+
+    if (midi) {
+      transport.setPieceGain(
+        practicePieceForFileName(midi.fileName)?.id === 'contrapunctus'
+          ? CONTRAPUNCTUS_PLAYBACK_GAIN
+          : 1,
+      )
+      transport.setTrackSoundOverrides(trackSoundOverridesForMidi(midi))
+      transport.load(midi.notes, midi.duration, visibleTracks)
+      transport.seek(currentTime)
+      transport.preloadCurrentSound()
+    }
+
+    transportRef.current = transport
   }
 
   const clearPracticeSession = useCallback(() => {
+    const activePiece = practiceRef.current?.piece
+
     practiceRunIdRef.current += 1
 
     if (practiceFrameRef.current !== null) {
@@ -435,7 +511,11 @@ function App() {
     duetTwoLeadInRef.current = false
     heldKeyboardPitchesRef.current.clear()
     practiceMatchedPitchesRef.current.clear()
-    transportRef.current?.stop()
+    if (activePiece === 'contrapunctus') {
+      transportRef.current?.stopDuetThree()
+    } else {
+      transportRef.current?.stop()
+    }
     setPracticeSession(null)
     setIsDuetTwoLeadIn(false)
     setDemonstrationPiece(null)
@@ -453,6 +533,14 @@ function App() {
     clearPracticeSession()
     const nextVisibleTracks = new Set(parsed.tracks.map((track) => track.track))
 
+    transportRef.current?.setPieceGain(
+      practicePieceForFileName(parsed.fileName)?.id === 'contrapunctus'
+        ? CONTRAPUNCTUS_PLAYBACK_GAIN
+        : 1,
+    )
+    transportRef.current?.setTrackSoundOverrides(
+      trackSoundOverridesForMidi(parsed),
+    )
     transportRef.current?.load(parsed.notes, parsed.duration, nextVisibleTracks)
     transportRef.current?.preloadCurrentSound()
     if (options.preloadKeyboard !== false) {
@@ -589,7 +677,10 @@ function App() {
     transportRef.current?.setVolume(volume)
   }, [volume])
 
-  const applyKeyboardOctave = useCallback((octaveLevel: number) => {
+  const applyKeyboardOctave = useCallback((
+    octaveLevel: number,
+    preload = true,
+  ) => {
     const nextOctaveLevel = clampKeyboardOctaveLevel(octaveLevel)
 
     if (nextOctaveLevel === keyboardOctaveLevelRef.current) {
@@ -603,7 +694,9 @@ function App() {
     setPressedKeyboardCodes(new Set())
     keyboardOctaveLevelRef.current = nextOctaveLevel
     setKeyboardOctaveLevel(nextOctaveLevel)
-    void transportRef.current?.prepareKeyboardOctave(nextOctaveLevel)
+    if (preload) {
+      void transportRef.current?.prepareKeyboardOctave(nextOctaveLevel)
+    }
   }, [])
 
   const advancePractice = useCallback(() => {
@@ -701,10 +794,6 @@ function App() {
           return
         }
 
-        if (nextEvent) {
-          transport.holdPracticeTail()
-        }
-
         const nextSession: PracticeSession = nextEvent
           ? {
               ...activeSession,
@@ -722,7 +811,7 @@ function App() {
 
         if (
           nextSession.status === 'waiting' &&
-          nextSession.piece === 'prelude'
+          practicePieces[nextSession.piece].automaticallySwitchOctaves
         ) {
           applyKeyboardOctave(
             nextSession.octaveLevels[nextSession.gateIndex] ??
@@ -758,7 +847,7 @@ function App() {
     }
 
     const piece = practicePieces[demonstrationPiece]
-    const tracks = getPracticeTracks(sourceMidi)
+    const tracks = practiceTracksForPiece(piece, sourceMidi)
 
     if (!tracks) {
       return
@@ -767,13 +856,19 @@ function App() {
     const events = createPracticeEvents(
       sourceMidi.notes.filter((note) => note.track === tracks.upper),
     )
-    if (demonstrationPiece !== 'prelude') {
+    const demonstrationVoice: PracticeVoice =
+      piece.trackLayout === 'all' ? 'sound1' : 'upper'
+    const initialOctaveLevel = defaultOctaveLevelForVoice(
+      piece,
+      demonstrationVoice,
+    )
+    if (!piece.automaticallySwitchOctaves) {
       return
     }
 
     const octaveLevels = choosePracticeOctaveLevels(
       events,
-      piece.defaultOctaveLevels.upper,
+      initialOctaveLevel,
     )
     const eventIndex = events.findLastIndex(
       (event) => event.start <= currentTime + 0.0001,
@@ -781,10 +876,43 @@ function App() {
 
     if (eventIndex >= 0) {
       applyKeyboardOctave(
-        octaveLevels[eventIndex] ?? piece.defaultOctaveLevels.upper,
+        octaveLevels[eventIndex] ?? initialOctaveLevel,
+        false,
       )
     }
   }, [applyKeyboardOctave, currentTime, demonstrationPiece, sourceMidi])
+
+  const demonstrationPressedKeyboardCodes = useMemo(() => {
+    if (!demonstrationPiece || !sourceMidi) {
+      return new Set<string>()
+    }
+
+    const tracks = practiceTracksForPiece(
+      practicePieces[demonstrationPiece],
+      sourceMidi,
+    )
+
+    if (!tracks) {
+      return new Set<string>()
+    }
+
+    const bindings = keyboardBindingsForOctaveLevel(keyboardOctaveLevel)
+
+    return new Set(
+      sourceMidi.notes
+        .filter(
+          (note) =>
+            note.track === tracks.upper &&
+            note.start <= currentTime + 0.0001 &&
+            note.end > currentTime - 0.0001,
+        )
+        .flatMap((note) => {
+        const binding = bindings.find((item) => item.pitch === note.pitch)
+
+        return binding ? [binding.code] : []
+        }),
+    )
+  }, [currentTime, demonstrationPiece, keyboardOctaveLevel, sourceMidi])
 
   useEffect(() => {
     const transport = transportRef.current
@@ -883,8 +1011,7 @@ function App() {
       const activePractice = practiceRef.current
 
       if (
-        activePractice?.piece === 'prelude' &&
-        duetTwoLeadInRef.current
+        activePractice && duetTwoLeadInRef.current
       ) {
         return
       }
@@ -912,7 +1039,18 @@ function App() {
 
         return new Set(current).add(event.code)
       })
-      void transport?.previewKeyDown(pitch, activeOctaveLevel)
+      const isDuetThree = activePractice?.piece === 'contrapunctus'
+
+      void transport?.previewKeyDown(
+        pitch,
+        activeOctaveLevel,
+        isDuetThree
+          ? {
+              velocity: 0.93,
+              useFullPiano: true,
+            }
+          : undefined,
+      )
       advancePractice()
     }
 
@@ -1067,21 +1205,35 @@ function App() {
         return
       }
 
-      const tracks = getPracticeTracks(parsed)
+      const tracks = practiceTracksForPiece(piece, parsed)
 
       if (!tracks) {
-        setError(`${piece.label} requires a two-voice MIDI file.`)
+        setError(
+          `${piece.label} requires a ${piece.trackLayout === 'all' ? 'four' : 'two'}-voice MIDI file.`,
+        )
         return
       }
 
       setDemonstrationPiece(null)
 
-      const playerTrack = voice === 'upper' ? tracks.upper : tracks.lower
+      const playerTrack = trackForPracticeVoice(piece, parsed, voice, tracks)
+
+      if (playerTrack === undefined) {
+        setError(`Could not find ${practiceVoiceLabel(voice)}.`)
+        return
+      }
+
       const companionTrack = voice === 'upper' ? tracks.lower : tracks.upper
+      const companionTracks =
+        piece.trackLayout === 'all'
+          ? parsed.tracks
+              .map((track) => track.track)
+              .filter((track) => track !== playerTrack)
+          : [companionTrack]
       const events = createPracticeEvents(
         parsed.notes.filter((note) => note.track === playerTrack),
       )
-      const initialOctaveLevel = piece.defaultOctaveLevels[voice]
+      const initialOctaveLevel = defaultOctaveLevelForVoice(piece, voice)
       const fixedOctaveLevel = piece.automaticallySwitchOctaves
         ? null
         : initialOctaveLevel
@@ -1096,7 +1248,9 @@ function App() {
 
       const firstEvent = events[0]
       const needsDuetTwoLeadIn =
-        piece.id === 'prelude' && firstEvent !== undefined && firstEvent.start > 0
+        (piece.id === 'prelude' || piece.id === 'contrapunctus') &&
+        firstEvent !== undefined &&
+        firstEvent.start > 0
       const runId = ++practiceRunIdRef.current
       const nextVisibleTracks = new Set(parsed.tracks.map((track) => track.track))
       const nextOctaveLevel = octaveLevels[0] ?? initialOctaveLevel
@@ -1107,8 +1261,8 @@ function App() {
         events,
         fixedOctaveLevel,
         octaveLevels,
-        companionNotes: parsed.notes.filter(
-          (note) => note.track === companionTrack,
+        companionNotes: parsed.notes.filter((note) =>
+          companionTracks.includes(note.track),
         ),
         duration: parsed.duration,
         gateIndex: 0,
@@ -1122,6 +1276,10 @@ function App() {
 
       playRequestIdRef.current += 1
       transport.stop()
+      transport.setPieceGain(
+        piece.id === 'contrapunctus' ? CONTRAPUNCTUS_PLAYBACK_GAIN : 1,
+      )
+      transport.setTrackSoundOverrides(trackSoundOverridesForMidi(parsed))
       transport.load(parsed.notes, parsed.duration, nextVisibleTracks)
       transport.setVisibleTracks(nextVisibleTracks)
       practiceRef.current = session
@@ -1207,7 +1365,6 @@ function App() {
             duetTwoLeadInFrameRef.current = null
             duetTwoLeadInRef.current = false
             setIsDuetTwoLeadIn(false)
-            transport.holdPracticeTail()
             const readySession: PracticeSession = {
               ...session,
               status: 'waiting',
@@ -1322,21 +1479,37 @@ function App() {
   ) => {
     const piece = practicePieces[pieceId]
     const demonstrationMidi = parsed ?? sourceMidi
-    const tracks = demonstrationMidi ? getPracticeTracks(demonstrationMidi) : null
+    const tracks = demonstrationMidi
+      ? practiceTracksForPiece(piece, demonstrationMidi)
+      : null
     const events = tracks && demonstrationMidi
       ? createPracticeEvents(
           demonstrationMidi.notes.filter((note) => note.track === tracks.upper),
         )
       : []
+    const demonstrationVoice: PracticeVoice =
+      piece.trackLayout === 'all' ? 'sound1' : 'upper'
+    const initialOctaveLevel = defaultOctaveLevelForVoice(
+      piece,
+      demonstrationVoice,
+    )
     const octaveLevels = piece.automaticallySwitchOctaves
-      ? choosePracticeOctaveLevels(events, piece.defaultOctaveLevels.upper)
+      ? choosePracticeOctaveLevels(events, initialOctaveLevel)
       : []
     const nextOctaveLevel = piece.automaticallySwitchOctaves
-      ? (octaveLevels[0] ?? piece.defaultOctaveLevels.upper)
-      : piece.defaultOctaveLevels.upper
+      ? (octaveLevels[0] ?? initialOctaveLevel)
+      : initialOctaveLevel
 
     setActiveGameMenu(null)
     setDemonstrationPiece(piece.id)
+    transportRef.current?.setPieceGain(
+      piece.id === 'contrapunctus' ? CONTRAPUNCTUS_PLAYBACK_GAIN : 1,
+    )
+    if (demonstrationMidi) {
+      transportRef.current?.setTrackSoundOverrides(
+        trackSoundOverridesForMidi(demonstrationMidi),
+      )
+    }
     keyboardOctaveLevelRef.current = nextOctaveLevel
     setKeyboardOctaveLevel(nextOctaveLevel)
     void handlePlay(0, parsed)
@@ -1455,13 +1628,17 @@ function App() {
     }
 
     playRequestIdRef.current += 1
-    transportRef.current?.stop()
+    if (demonstrationPiece === 'contrapunctus') {
+      transportRef.current?.stopDuetThree()
+    } else {
+      transportRef.current?.stop()
+    }
     setCurrentTime(0)
     setIsPlaying(false)
     setIsPreparing(false)
     setIsOverview(false)
     setDemonstrationPiece(null)
-  }, [clearPracticeSession])
+  }, [clearPracticeSession, demonstrationPiece])
 
   const handleSeek = useCallback((time: number) => {
     if (practiceRef.current) {
@@ -1646,24 +1823,18 @@ function App() {
               </button>
               {activeGameMenu === piece.id ? (
                 <div className="game-menu" role="menu" aria-label={`${piece.label} voice`}>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      void handleDuetChoice(piece.id, 'upper')
-                    }}
-                  >
-                    Upper Voice
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      void handleDuetChoice(piece.id, 'lower')
-                    }}
-                  >
-                    Lower Voice
-                  </button>
+                  {practiceVoiceOptions(piece).map((voice) => (
+                    <button
+                      key={voice}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        void handleDuetChoice(piece.id, voice)
+                      }}
+                    >
+                      {practiceVoiceLabel(voice)}
+                    </button>
+                  ))}
                   <button
                     type="button"
                     role="menuitem"
@@ -1725,6 +1896,7 @@ function App() {
             visibleTracks={visibleTracks}
             motifGroups={motifGroups}
             motifTraceEnabled={motifTraceEnabled && sourceKind === 'midi'}
+            subjectTraces={duetThreeSubjectTraces}
             symmetryGroups={symmetryGroups}
             axisSymmetryEnabled={axisSymmetryEnabled && sourceKind === 'midi'}
             centerSymmetryEnabled={centerSymmetryEnabled && sourceKind === 'midi'}
@@ -1732,11 +1904,21 @@ function App() {
             showStaffLines={showStaffLines}
             highlightedPitches={pressedKeyboardPitches}
             keyboardOctaveLevel={keyboardOctaveLevel}
-            pressedKeyboardCodes={pressedKeyboardCodes}
+            pressedKeyboardCodes={
+              isDemonstration
+                ? demonstrationPressedKeyboardCodes
+                : pressedKeyboardCodes
+            }
             keyboardIndexVisible={
               Boolean(midi) && (!isPlaying || isDemonstration) && !isPreparing
             }
             keyName={keyName}
+            cutoffTime={
+              practicePieceForFileName(midi?.fileName ?? '')?.id ===
+              'contrapunctus'
+                ? BACH_CUTOFF_SECONDS
+                : null
+            }
       />
 
       {error ? <p className="error-line">{error}</p> : null}

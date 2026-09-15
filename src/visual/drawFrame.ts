@@ -1,8 +1,10 @@
 import type { MotifGroup } from '../midi/motifAnalysis'
+import type { SubjectTrace } from '../midi/contrapunctusSubjects'
 import type { ParsedMidi, PitchRange } from '../midi/noteTypes'
 import type { SymmetryGroups } from '../midi/symmetryAnalysis'
 import { getInkCoordinates, renderInkFlow } from './inkRenderer'
 import { renderMotifTrace } from './motifRenderer'
+import { renderSubjectTraces } from './subjectRenderer'
 import { renderGrandStaff } from './staffRenderer'
 import { renderSymmetryTrace } from './symmetryRenderer'
 import { renderGwWaveform } from './waveformRenderer'
@@ -17,6 +19,7 @@ interface DrawFrameOptions {
   visibleTracks: ReadonlySet<number>
   motifGroups?: MotifGroup[]
   motifTraceEnabled?: boolean
+  subjectTraces?: SubjectTrace[]
   symmetryGroups?: SymmetryGroups
   axisSymmetryEnabled?: boolean
   centerSymmetryEnabled?: boolean
@@ -25,6 +28,7 @@ interface DrawFrameOptions {
   highlightedPitches?: ReadonlySet<number>
   keyboardRange?: PitchRange
   keyName?: string | null
+  cutoffTime?: number | null
   showEmptyState?: boolean
 }
 
@@ -110,6 +114,7 @@ export const drawVisualizationFrame = ({
   visibleTracks,
   motifGroups = [],
   motifTraceEnabled = false,
+  subjectTraces = [],
   symmetryGroups = { axis: [], center: [] },
   axisSymmetryEnabled = false,
   centerSymmetryEnabled = false,
@@ -118,6 +123,7 @@ export const drawVisualizationFrame = ({
   highlightedPitches = new Set<number>(),
   keyboardRange,
   keyName = null,
+  cutoffTime = null,
   showEmptyState = false,
 }: DrawFrameOptions) => {
   ctx.clearRect(0, 0, width, height)
@@ -167,6 +173,21 @@ export const drawVisualizationFrame = ({
     highlightedPitches,
   })
 
+  if (cutoffTime !== null) {
+    const cutoffX = coordinates.timeToX(cutoffTime)
+
+    if (cutoffX >= -1 && cutoffX <= width + 1) {
+      ctx.save()
+      ctx.strokeStyle = 'rgba(47, 44, 39, 0.52)'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(cutoffX, 0)
+      ctx.lineTo(cutoffX, inkHeight)
+      ctx.stroke()
+      ctx.restore()
+    }
+  }
+
   if (keyName) {
     ctx.save()
     ctx.fillStyle = 'rgba(47, 44, 39, 0.76)'
@@ -178,6 +199,17 @@ export const drawVisualizationFrame = ({
   }
 
   const inkMetrics = renderInkFlow(options)
+
+  if (subjectTraces.length > 0) {
+    renderSubjectTraces({
+      ctx,
+      traces: subjectTraces,
+      notes: midi.notes,
+      currentTime,
+      coordinates: inkMetrics.coordinates,
+      visibleTracks,
+    })
+  }
 
   if (motifTraceEnabled && motifGroups.length > 0) {
     renderMotifTrace({

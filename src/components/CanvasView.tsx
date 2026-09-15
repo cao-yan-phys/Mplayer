@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { MotifGroup } from '../midi/motifAnalysis'
+import type { SubjectTrace } from '../midi/contrapunctusSubjects'
 import type { ParsedMidi } from '../midi/noteTypes'
 import type { SymmetryGroups } from '../midi/symmetryAnalysis'
 import { drawVisualizationFrame } from '../visual/drawFrame'
@@ -16,6 +17,7 @@ interface CanvasViewProps {
   visibleTracks: ReadonlySet<number>
   motifGroups: MotifGroup[]
   motifTraceEnabled: boolean
+  subjectTraces: SubjectTrace[]
   symmetryGroups: SymmetryGroups
   axisSymmetryEnabled: boolean
   centerSymmetryEnabled: boolean
@@ -26,6 +28,7 @@ interface CanvasViewProps {
   pressedKeyboardCodes: ReadonlySet<string>
   keyboardIndexVisible: boolean
   keyName: string | null
+  cutoffTime: number | null
 }
 
 interface CanvasSize {
@@ -62,6 +65,7 @@ export function CanvasView({
   visibleTracks,
   motifGroups,
   motifTraceEnabled,
+  subjectTraces,
   symmetryGroups,
   axisSymmetryEnabled,
   centerSymmetryEnabled,
@@ -72,6 +76,7 @@ export function CanvasView({
   pressedKeyboardCodes,
   keyboardIndexVisible,
   keyName,
+  cutoffTime,
 }: CanvasViewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const clefCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -286,6 +291,7 @@ export function CanvasView({
         visibleTracks,
         motifGroups,
         motifTraceEnabled,
+        subjectTraces,
         symmetryGroups,
         axisSymmetryEnabled,
         centerSymmetryEnabled,
@@ -293,6 +299,7 @@ export function CanvasView({
         showStaffLines,
         highlightedPitches,
         keyName,
+        cutoffTime,
         showEmptyState: true,
       })
     }
@@ -348,6 +355,7 @@ export function CanvasView({
     midi,
     motifGroups,
     motifTraceEnabled,
+    subjectTraces,
     symmetryGroups,
     axisSymmetryEnabled,
     centerSymmetryEnabled,
@@ -358,6 +366,7 @@ export function CanvasView({
     size.width,
     visibleTracks,
     keyName,
+    cutoffTime,
     stationaryTime,
   ])
 
