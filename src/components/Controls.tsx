@@ -18,6 +18,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react'
+import { useRef, useState } from 'react'
 import type { TrackSummary } from '../midi/noteTypes'
 import { MAX_TRANSPOSE, MIN_TRANSPOSE } from '../midi/transposeMidi'
 import {
@@ -31,6 +32,7 @@ import {
 interface ControlsProps {
   disabled: boolean
   practiceActive: boolean
+  practicePaused: boolean
   demonstrationActive: boolean
   practiceRateLocked: boolean
   isPlaying: boolean
@@ -57,7 +59,9 @@ interface ControlsProps {
   onPause: () => void
   onStop: () => void
   onToggleReversePlayback: () => void
-  onSeek: (time: number) => void
+  onSeekStart: () => void
+  onSeekPreview: (time: number) => void
+  onSeekCommit: (time: number) => void
   onSoundPresetChange: (soundPreset: SoundPreset) => void
   onPlaybackRateChange: (playbackRate: PlaybackRate) => void
   onVolumeChange: (volume: number) => void
@@ -113,6 +117,7 @@ const formatPlaybackRate = (playbackRate: PlaybackRate) => {
 export function Controls({
   disabled,
   practiceActive,
+  practicePaused,
   demonstrationActive,
   practiceRateLocked,
   isPlaying,
@@ -139,7 +144,9 @@ export function Controls({
   onPause,
   onStop,
   onToggleReversePlayback,
-  onSeek,
+  onSeekStart,
+  onSeekPreview,
+  onSeekCommit,
   onSoundPresetChange,
   onPlaybackRateChange,
   onVolumeChange,
@@ -154,6 +161,31 @@ export function Controls({
   onToggleZen,
 }: ControlsProps) {
   const controlsLocked = disabled || practiceActive || demonstrationActive
+  const practiceIsPlaying = practiceActive && practiceRateLocked
+  const transportIsPlaying = isPlaying || practiceIsPlaying
+  const [seekPreviewTime, setSeekPreviewTime] = useState<number | null>(null)
+  const isSeekingRef = useRef(false)
+  const progressTime = seekPreviewTime ?? Math.min(currentTime, duration)
+
+  const beginSeek = () => {
+    if (isSeekingRef.current) {
+      return
+    }
+
+    isSeekingRef.current = true
+    setSeekPreviewTime(Math.min(currentTime, duration))
+    onSeekStart()
+  }
+
+  const commitSeek = (time: number, input: HTMLInputElement) => {
+    isSeekingRef.current = false
+    setSeekPreviewTime(null)
+    onSeekCommit(time)
+
+    if (practiceActive) {
+      input.blur()
+    }
+  }
 
   return (
     <section className="controls" aria-label="Playback controls">
@@ -161,14 +193,22 @@ export function Controls({
         <button
           className="icon-button"
           type="button"
-          disabled={disabled || practiceActive || isPreparing}
-          title={isPreparing ? 'Loading instrument' : isPlaying ? 'Pause' : 'Play'}
-          aria-label={isPreparing ? 'Loading instrument' : isPlaying ? 'Pause' : 'Play'}
-          onClick={isPlaying ? onPause : () => void onPlay()}
+          disabled={
+            disabled ||
+            isPreparing ||
+            (practiceActive && !practiceIsPlaying && !practicePaused)
+          }
+          title={
+            isPreparing ? 'Loading instrument' : transportIsPlaying ? 'Pause' : 'Play'
+          }
+          aria-label={
+            isPreparing ? 'Loading instrument' : transportIsPlaying ? 'Pause' : 'Play'
+          }
+          onClick={transportIsPlaying ? onPause : () => void onPlay()}
         >
           {isPreparing ? (
             <LoaderCircle className="loading-icon" size={17} />
-          ) : isPlaying ? (
+          ) : transportIsPlaying ? (
             <Pause size={17} />
           ) : (
             <Play size={17} />
@@ -347,10 +387,29 @@ export function Controls({
             min={0}
             max={Math.max(duration, 0.01)}
             step={0.01}
-            value={Math.min(currentTime, duration)}
-            disabled={disabled || practiceActive || isPreparing}
+            value={progressTime}
+            disabled={disabled || isPreparing}
             aria-label="Playback progress"
-            onChange={(event) => onSeek(Number(event.currentTarget.value))}
+            onChange={(event) => {
+              const time = Number(event.currentTarget.value)
+
+              if (!isSeekingRef.current) {
+                beginSeek()
+                onSeekPreview(time)
+                commitSeek(time, event.currentTarget)
+                return
+              }
+
+              setSeekPreviewTime(time)
+              onSeekPreview(time)
+            }}
+            onPointerDown={beginSeek}
+            onPointerUp={(event) =>
+              commitSeek(Number(event.currentTarget.value), event.currentTarget)
+            }
+            onPointerCancel={(event) =>
+              commitSeek(Number(event.currentTarget.value), event.currentTarget)
+            }
           />
           <span className="time-readout">
             {formatTime(currentTime)} / {formatTime(duration)}

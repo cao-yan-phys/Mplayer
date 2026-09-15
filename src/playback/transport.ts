@@ -16,6 +16,7 @@ import {
   getOcarinaGainProfile,
   getSmallPianoVoiceProfile,
 } from './soundProfiles'
+import { TrackPianoBank } from './trackPianoBank'
 
 type TransportState = 'stopped' | 'paused' | 'playing'
 
@@ -151,7 +152,7 @@ export const normalizePlaybackRate = (rate: number): PlaybackRate => {
 }
 
 export class MidiTransport {
-  readonly revision = 8
+  readonly revision = 14
 
   private context: AudioContext | null = null
 
@@ -188,6 +189,8 @@ export class MidiTransport {
   private pianoRangeKey = ''
 
   private pianoGeneration = 0
+
+  private trackPianoBank: TrackPianoBank | null = null
 
   private musicBoxBuffers = new Map<string, AudioBuffer>()
 
@@ -230,6 +233,8 @@ export class MidiTransport {
   private keyboardHeldPitches = new Set<number>()
 
   private keyboardVoices = new Map<number, KeyboardVoice>()
+
+  private resumeAfterSeek = false
 
   private readonly onEnded: (time: number) => void
 
@@ -359,6 +364,42 @@ export class MidiTransport {
     })
   }
 
+  async prepareTrackPianoBank(notes: readonly MidiNote[]) {
+    const context = this.ensureContext()
+    await context.resume()
+    await startTone()
+
+    if (!this.trackPianoBank) {
+      this.trackPianoBank = new TrackPianoBank(this.getPianoToneFilter())
+    }
+
+    const range = this.getPianoRange()
+    await this.trackPianoBank.prepare(notes, range, this.getPianoVolumes())
+  }
+
+  playTrackPianoBank(
+    notes: readonly MidiNote[],
+    startAt: number,
+    endAt: number,
+  ) {
+    this.openPianoOutput()
+    this.trackPianoBank?.schedule(
+      notes,
+      startAt,
+      endAt,
+      this.playbackRate,
+    )
+  }
+
+  clearTrackPianoBank() {
+    this.trackPianoBank?.clear()
+    this.trackPianoBank = null
+  }
+
+  cancelTrackPianoBank() {
+    this.trackPianoBank?.cancel()
+  }
+
   setPlaybackRate(playbackRate: PlaybackRate) {
     const nextRate = normalizePlaybackRate(playbackRate)
 
@@ -485,9 +526,25 @@ export class MidiTransport {
     this.stopActiveVoices()
   }
 
-  stopDuetThree() {
-    this.stop()
-    this.discardScheduledPiano()
+  beginSeek(options: { preserveMainPiano?: boolean } = {}) {
+    this.resumeAfterSeek = this.state === 'playing'
+    this.position = this.getCurrentTime()
+    this.basePosition = this.position
+    this.state = 'paused'
+    this.clearScheduler()
+    this.silenceScheduledPlayback(options.preserveMainPiano ?? false)
+  }
+
+  async finishSeek(time: number, resumePlayback = this.resumeAfterSeek) {
+    const nextTime = clamp(time, 0, this.duration)
+    this.position = nextTime
+    this.basePosition = nextTime
+    this.nextNoteIndex = this.findNextNoteIndex(nextTime)
+    this.resumeAfterSeek = false
+
+    if (resumePlayback) {
+      await this.play(nextTime)
+    }
   }
 
   seek(time: number) {
@@ -1047,6 +1104,49 @@ export class MidiTransport {
     this.pianoOutputOpen = false
   }
 
+  private silenceScheduledPlayback(preserveMainPiano: boolean) {
+    const contextTime = this.context?.currentTime ?? 0
+
+    if (this.pianoOutputGate) {
+      const time = toneNow()
+      this.pianoOutputGate.gain.cancelScheduledValues(time)
+      this.pianoOutputGate.gain.setValueAtTime(0.0001, time)
+      this.pianoOutputOpen = false
+    }
+
+    this.releaseKeyboardNotes()
+    if (!preserveMainPiano) {
+      this.discardPianoForSeek()
+    }
+    this.cancelTrackPianoBank()
+
+    this.activeVoices.forEach((voice) => {
+      voice.gains.forEach((gain) => {
+        gain.gain.cancelScheduledValues(contextTime)
+        gain.gain.setValueAtTime(0.0001, contextTime)
+      })
+
+      voice.sources.forEach((source) => {
+        try {
+          source.stop(contextTime)
+        } catch {
+        }
+      })
+    })
+
+    this.activeVoices = []
+  }
+
+  private discardPianoForSeek() {
+    this.pianoGeneration += 1
+    this.piano?.dispose()
+    this.pianoPreview?.dispose()
+    this.piano = null
+    this.pianoLoadPromise = null
+    this.pianoPreview = null
+    this.pianoPreviewLoadPromise = null
+  }
+
   private resetPiano() {
     this.releaseKeyboardNotes()
     this.resetKeyboardPiano()
@@ -1056,6 +1156,7 @@ export class MidiTransport {
   }
 
   private discardScheduledPiano() {
+    this.clearTrackPianoBank()
     this.pianoGeneration += 1
     this.piano?.dispose()
     this.pianoPreview?.dispose()

@@ -30,6 +30,7 @@ const drawTrace = (
   color: string,
   lineWidth: number,
   alpha: number,
+  lineStyle: SubjectTrace['lineStyle'],
 ) => {
   let previous: MidiNote | null = null
   let hasPath = false
@@ -39,6 +40,7 @@ const drawTrace = (
   ctx.lineWidth = lineWidth
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
+  ctx.setLineDash(lineStyle === 'dashed' ? [8, 6] : [])
   ctx.beginPath()
 
   notes.forEach((note) => {
@@ -154,6 +156,7 @@ export const renderSubjectTraces = ({
       trace.color,
       11,
       Math.max(alpha, 0.48) * 0.28,
+      trace.lineStyle,
     )
     drawTrace(
       ctx,
@@ -163,6 +166,7 @@ export const renderSubjectTraces = ({
       trace.color,
       3.5,
       Math.max(alpha, 0.58),
+      trace.lineStyle,
     )
     if (trace.label) {
       drawLabel(ctx, trace.label, first, coordinates, trace.color)

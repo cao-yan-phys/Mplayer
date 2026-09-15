@@ -4,6 +4,7 @@ export interface SubjectTrace {
   id: string
   label?: string
   color: string
+  lineStyle: 'solid' | 'dashed'
   noteIds: string[]
 }
 
@@ -11,9 +12,14 @@ interface SubjectDefinition {
   id: string
   label: string
   color: string
+  occurrences: SubjectOccurrence[]
+}
+
+interface SubjectOccurrence {
   track: number
   start: number
-  pitches: number[]
+  noteCount: number
+  inverted?: boolean
 }
 
 const subjects: SubjectDefinition[] = [
@@ -21,88 +27,125 @@ const subjects: SubjectDefinition[] = [
     id: '1',
     label: '1',
     color: '#b42432',
-    track: 3,
-    start: 1,
-    pitches: [50, 57, 55, 53, 55, 57, 50],
+    occurrences: [
+      { track: 3, start: 1, noteCount: 7 },
+      { track: 2, start: 11, noteCount: 7 },
+      { track: 1, start: 21, noteCount: 7 },
+      { track: 0, start: 31, noteCount: 7 },
+      { track: 3, start: 41, noteCount: 7, inverted: true },
+      { track: 2, start: 47, noteCount: 7 },
+      { track: 1, start: 59, noteCount: 7, inverted: true },
+      { track: 0, start: 73, noteCount: 7 },
+      { track: 1, start: 75, noteCount: 7 },
+      { track: 3, start: 85, noteCount: 7 },
+      { track: 2, start: 109, noteCount: 7, inverted: true },
+      { track: 3, start: 121, noteCount: 7 },
+      { track: 0, start: 123, noteCount: 7 },
+      { track: 1, start: 140, noteCount: 7, inverted: true },
+      { track: 2, start: 143, noteCount: 7, inverted: true },
+      { track: 0, start: 157, noteCount: 7, inverted: true },
+      { track: 1, start: 161, noteCount: 7 },
+      { track: 3, start: 177, noteCount: 7 },
+      { track: 2, start: 179, noteCount: 7, inverted: true },
+      { track: 1, start: 183, noteCount: 7 },
+      { track: 2, start: 193, noteCount: 7 },
+      { track: 1, start: 197, noteCount: 7 },
+      { track: 3, start: 209.5, noteCount: 7 },
+      { track: 3, start: 295, noteCount: 7 },
+      { track: 2, start: 313, noteCount: 7 },
+      { track: 0, start: 337, noteCount: 7 },
+      { track: 1, start: 363, noteCount: 7 },
+      { track: 0, start: 365, noteCount: 7 },
+      { track: 0, start: 420.5, noteCount: 7, inverted: true },
+      { track: 3, start: 467, noteCount: 7 },
+    ],
   },
   {
     id: '2',
     label: '2',
     color: '#b57400',
-    track: 1,
-    start: 226.5,
-    pitches: [
-      65, 67, 65, 64, 62, 61, 62, 57, 62, 64, 65, 64, 62, 65, 64, 57,
-      64, 65, 67, 65, 64, 65, 67, 69, 67, 65, 67, 69, 67, 66, 67, 69,
-      70, 69, 67, 65, 64, 62, 64, 67, 65,
+    occurrences: [
+      { track: 1, start: 226.5, noteCount: 41 },
+      { track: 0, start: 240.5, noteCount: 41 },
+      { track: 3, start: 254.5, noteCount: 41 },
+      { track: 2, start: 268.5, noteCount: 41 },
+      { track: 0, start: 292.5, noteCount: 41 },
+      { track: 1, start: 310.5, noteCount: 41 },
+      { track: 3, start: 358.5, noteCount: 41 },
+      { track: 1, start: 464.5, noteCount: 41 },
     ],
   },
   {
     id: '3',
     label: '3',
     color: '#762a75',
-    track: 2,
-    start: 385,
-    pitches: [58, 57, 60, 59, 61, 62, 61, 59, 61, 62],
+    occurrences: [
+      { track: 2, start: 385, noteCount: 10 },
+      { track: 1, start: 389, noteCount: 10 },
+      { track: 0, start: 401, noteCount: 10 },
+      { track: 3, start: 405, noteCount: 10 },
+      { track: 2, start: 419, noteCount: 10 },
+      { track: 0, start: 433, noteCount: 10 },
+      { track: 3, start: 434, noteCount: 10 },
+      { track: 2, start: 449.5, noteCount: 10 },
+      { track: 1, start: 451, noteCount: 10 },
+      { track: 2, start: 469, noteCount: 10 },
+    ],
   },
   {
     id: '4',
     label: '4',
     color: '#12665c',
-    track: 2,
-    start: 480,
-    pitches: [50, 57, 53, 50, 49, 50, 52, 53],
+    occurrences: [{ track: 2, start: 480, noteCount: 8 }],
   },
 ]
 
-const matchesSubject = (
+const notesForOccurrence = (
   notes: readonly MidiNote[],
-  definition: SubjectDefinition,
-) =>
-  notes.length === definition.pitches.length &&
-  notes.slice(1).every(
-    (note, index) =>
-      note.pitch - notes[index]!.pitch ===
-      definition.pitches[index + 1]! - definition.pitches[index]!,
+  occurrence: SubjectOccurrence,
+) => {
+  const startIndex = notes.findIndex(
+    (note) => Math.abs(note.start - occurrence.start) < 0.01,
   )
+
+  if (startIndex === -1) {
+    return []
+  }
+
+  const subjectNotes = notes.slice(
+    startIndex,
+    startIndex + occurrence.noteCount,
+  )
+
+  return subjectNotes.length === occurrence.noteCount ? subjectNotes : []
+}
 
 export const findContrapunctusSubjectTraces = (
   midi: ParsedMidi,
 ): SubjectTrace[] =>
   subjects.flatMap((definition) => {
-    const occurrences: MidiNote[][] = []
+    return definition.occurrences
+      .map((occurrence) => {
+        const trackNotes = midi.notes
+          .filter((note) => note.track === occurrence.track)
+          .sort(
+            (left, right) =>
+              left.start - right.start || left.pitch - right.pitch,
+          )
 
-    midi.tracks.forEach((track) => {
-      const trackNotes = midi.notes
-        .filter((note) => note.track === track.track)
-        .sort((left, right) => left.start - right.start || left.pitch - right.pitch)
-
-      for (
-        let index = 0;
-        index + definition.pitches.length <= trackNotes.length;
-        index += 1
-      ) {
-        const notes = trackNotes.slice(
-          index,
-          index + definition.pitches.length,
-        )
-
-        if (matchesSubject(notes, definition)) {
-          occurrences.push(notes)
+        return {
+          notes: notesForOccurrence(trackNotes, occurrence),
+          lineStyle: occurrence.inverted
+            ? ('dashed' as const)
+            : ('solid' as const),
         }
-      }
-    })
-
-    return occurrences
-      .sort(
-        (left, right) =>
-          (left[0]?.start ?? 0) - (right[0]?.start ?? 0) ||
-          (left[0]?.track ?? 0) - (right[0]?.track ?? 0),
-      )
-      .map((notes, index) => ({
-        id: `${definition.id}:${notes[0]?.track ?? 0}:${notes[0]?.start ?? 0}`,
+      })
+      .filter((occurrence) => occurrence.notes.length > 0)
+      .map((occurrence, index) => ({
+        id: `${definition.id}:${occurrence.notes[0]?.track ?? 0}:${occurrence.notes[0]?.start ?? 0}`,
         label: index === 0 ? definition.label : undefined,
         color: definition.color,
-        noteIds: notes.map((note) => note.id),
+        lineStyle: occurrence.lineStyle,
+        noteIds: occurrence.notes.map((note) => note.id),
       }))
   })

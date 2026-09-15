@@ -23,6 +23,7 @@ interface CanvasViewProps {
   centerSymmetryEnabled: boolean
   showChromaticLines: boolean
   showStaffLines: boolean
+  goldInkMode: boolean
   highlightedPitches: ReadonlySet<number>
   keyboardOctaveLevel: number
   pressedKeyboardCodes: ReadonlySet<string>
@@ -56,6 +57,12 @@ const OVERVIEW_TRANSITION_MS = 1800
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max)
 
+const getCanvasPixelRatio = (goldInkMode: boolean) => {
+  const pixelRatio = window.devicePixelRatio || 1
+
+  return goldInkMode ? Math.min(pixelRatio, 1.5) : pixelRatio
+}
+
 export function CanvasView({
   midi,
   currentTime,
@@ -71,6 +78,7 @@ export function CanvasView({
   centerSymmetryEnabled,
   showChromaticLines,
   showStaffLines,
+  goldInkMode,
   highlightedPitches,
   keyboardOctaveLevel,
   pressedKeyboardCodes,
@@ -206,12 +214,12 @@ export function CanvasView({
       return
     }
 
-    const pixelRatio = window.devicePixelRatio || 1
+    const pixelRatio = getCanvasPixelRatio(goldInkMode)
     canvas.width = Math.round(size.width * pixelRatio)
     canvas.height = Math.round(size.height * pixelRatio)
     clefCanvas.width = Math.round(railSize.width * pixelRatio)
     clefCanvas.height = Math.round(railSize.height * pixelRatio)
-  }, [railSize.height, railSize.width, size.height, size.width])
+  }, [goldInkMode, railSize.height, railSize.width, size.height, size.width])
 
   useEffect(() => {
     const canvas = clefCanvasRef.current
@@ -220,7 +228,7 @@ export function CanvasView({
       return
     }
 
-    const pixelRatio = window.devicePixelRatio || 1
+    const pixelRatio = getCanvasPixelRatio(goldInkMode)
     const ctx = canvas.getContext('2d')
 
     if (!ctx) {
@@ -229,7 +237,13 @@ export function CanvasView({
 
     ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
 
-    if (!midi || !clefFontReady || size.width <= 0 || size.height <= 0) {
+    if (
+      goldInkMode ||
+      !midi ||
+      !clefFontReady ||
+      size.width <= 0 ||
+      size.height <= 0
+    ) {
       ctx.clearRect(0, 0, railSize.width, railSize.height)
       return
     }
@@ -256,6 +270,7 @@ export function CanvasView({
     })
   }, [
     clefFontReady,
+    goldInkMode,
     midi,
     railSize.height,
     railSize.width,
@@ -272,7 +287,7 @@ export function CanvasView({
     }
 
     let frameId = 0
-    const pixelRatio = window.devicePixelRatio || 1
+    const pixelRatio = getCanvasPixelRatio(goldInkMode)
     const ctx = canvas.getContext('2d')
 
     if (!ctx) {
@@ -297,6 +312,7 @@ export function CanvasView({
         centerSymmetryEnabled,
         showChromaticLines,
         showStaffLines,
+        goldInkMode,
         highlightedPitches,
         keyName,
         cutoffTime,
@@ -361,6 +377,7 @@ export function CanvasView({
     centerSymmetryEnabled,
     showChromaticLines,
     showStaffLines,
+    goldInkMode,
     highlightedPitches,
     size.height,
     size.width,

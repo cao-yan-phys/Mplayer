@@ -47,6 +47,7 @@ export const createCoordinateSystem = (
   duration: number,
   currentTime: number,
   pitchRange: PitchRange,
+  pixelsPerSecondOverride?: number,
 ): CoordinateSystem => {
   const paddingTop = clamp(height * 0.12, 38, 96)
   const paddingBottom = clamp(height * 0.16, 48, 128)
@@ -57,7 +58,8 @@ export const createCoordinateSystem = (
   const pitchSpan = Math.max(1, maxPitch - minPitch)
   const safeDuration = Math.max(duration, 0.01)
   const writeHeadX = getWriteHeadX(width)
-  const pixelsPerSecond = clamp(width / 13.5, 44, 92)
+  const pixelsPerSecond =
+    pixelsPerSecondOverride ?? clamp(width / 13.5, 44, 92)
   const trailSeconds = writeHeadX / pixelsPerSecond
   const visibleStart = currentTime - trailSeconds - 0.8
   const visibleEnd = currentTime + (width - writeHeadX) / pixelsPerSecond

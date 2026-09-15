@@ -58,7 +58,13 @@ const BACH_CUTOFF_SECONDS = 478
 
 type SourceKind = 'midi' | 'csv'
 
-type PracticeStatus = 'preparing' | 'waiting' | 'running' | 'complete'
+type PracticeStatus =
+  | 'preparing'
+  | 'paused'
+  | 'waiting'
+  | 'running'
+  | 'resuming'
+  | 'complete'
 
 type DuetMode = PracticeVoice | 'demonstration'
 
@@ -70,6 +76,7 @@ interface PracticePiece {
   fileName: string
   defaultOctaveLevels: Partial<Record<PracticeVoice, number>>
   automaticallySwitchOctaves: boolean
+  usesIndependentAccompaniment: boolean
   trackLayout: 'pair' | 'all'
 }
 
@@ -80,6 +87,7 @@ const practicePieces: Record<PracticePieceId, PracticePiece> = {
     fileName: ariaMidiFileName,
     defaultOctaveLevels: { upper: 5, lower: 3 },
     automaticallySwitchOctaves: false,
+    usesIndependentAccompaniment: false,
     trackLayout: 'pair',
   },
   prelude: {
@@ -88,6 +96,7 @@ const practicePieces: Record<PracticePieceId, PracticePiece> = {
     fileName: preludeMidiFileName,
     defaultOctaveLevels: { upper: 4, lower: 3 },
     automaticallySwitchOctaves: true,
+    usesIndependentAccompaniment: false,
     trackLayout: 'pair',
   },
   contrapunctus: {
@@ -96,6 +105,7 @@ const practicePieces: Record<PracticePieceId, PracticePiece> = {
     fileName: contrapunctusMidiFileName,
     defaultOctaveLevels: { sound1: 5, sound2: 4, sound3: 3, sound4: 3 },
     automaticallySwitchOctaves: true,
+    usesIndependentAccompaniment: true,
     trackLayout: 'all',
   },
 }
@@ -116,13 +126,14 @@ interface PracticeSession {
 interface PracticeSequenceData {
   lineStart: number
   timingProgress: number | null
-  items: Array<{
-    isCompleted: boolean
-    isCurrent: boolean
-    isQuick: boolean
-    notes: Array<{
-      keyLabel: string
-    }>
+    items: Array<{
+      isCompleted: boolean
+      isPrevious: boolean
+      isCurrent: boolean
+      isQuick: boolean
+      notes: Array<{
+        keyLabel: string
+      }>
   }>
 }
 
@@ -209,6 +220,7 @@ function PracticeSequence({
               [
                 'practice-sequence__event',
                 event.isCompleted ? 'is-completed' : '',
+                event.isPrevious ? 'is-previous' : '',
                 event.isCurrent ? 'is-current' : '',
                 event.isQuick ? 'is-quick' : '',
               ]
@@ -256,6 +268,7 @@ function App() {
   const [centerSymmetryEnabled, setCenterSymmetryEnabled] = useState(false)
   const [showChromaticLines, setShowChromaticLines] = useState(true)
   const [showStaffLines, setShowStaffLines] = useState(true)
+  const [goldInkMode, setGoldInkMode] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isZen, setIsZen] = useState(false)
   const [isOverview, setIsOverview] = useState(false)
@@ -273,6 +286,8 @@ function App() {
     useState<PracticePieceId | null>(null)
   const [demonstrationPiece, setDemonstrationPiece] =
     useState<PracticePieceId | null>(null)
+  const [completedContrapunctusDemo, setCompletedContrapunctusDemo] =
+    useState(false)
   const [practiceSession, setPracticeSession] =
     useState<PracticeSession | null>(null)
   const [isDuetTwoLeadIn, setIsDuetTwoLeadIn] = useState(false)
@@ -290,16 +305,27 @@ function App() {
   const practiceRunIdRef = useRef(0)
   const heldKeyboardPitchesRef = useRef(new Set<number>())
   const practiceMatchedPitchesRef = useRef(new Set<number>())
+  const demonstrationPieceRef = useRef<PracticePieceId | null>(null)
   const currentTimeRef = useRef(currentTime)
+  const seekWasPlayingRef = useRef(false)
   const keyboardOctaveLevelRef = useRef(keyboardOctaveLevel)
   const lastPracticeUiUpdateRef = useRef(0)
 
   const isDemonstration = demonstrationPiece !== null
+  const goldInkModeActive =
+    goldInkMode &&
+    sourceKind === 'midi' &&
+    !practiceSession &&
+    !isDemonstration
+  demonstrationPieceRef.current = demonstrationPiece
   const isPracticeAnimating =
-    practiceSession?.status === 'running' || isDuetTwoLeadIn
+    practiceSession?.status === 'running' ||
+    practiceSession?.status === 'resuming' ||
+    isDuetTwoLeadIn
 
   if (
     practiceRef.current?.status !== 'running' &&
+    practiceRef.current?.status !== 'resuming' &&
     !duetTwoLeadInRef.current
   ) {
     currentTimeRef.current = currentTime
@@ -338,10 +364,12 @@ function App() {
   )
   const duetThreeSubjectTraces = useMemo(
     () =>
-      demonstrationPiece === 'contrapunctus' && midi
+      (demonstrationPiece === 'contrapunctus' ||
+        (completedContrapunctusDemo && isOverview)) &&
+      midi
         ? findContrapunctusSubjectTraces(midi)
         : [],
-    [demonstrationPiece, midi],
+    [completedContrapunctusDemo, demonstrationPiece, isOverview, midi],
   )
   const practiceSequence = useMemo<PracticeSequenceData | null>(() => {
     if (
@@ -385,32 +413,32 @@ function App() {
       timingProgress,
       items: practiceSession.events
         .slice(lineStart, lineStart + PRACTICE_SEQUENCE_LENGTH)
-        .map((event, index) => ({
-          isCompleted: lineStart + index < nextEventIndex,
-          isCurrent: lineStart + index === currentEventIndex,
-          isQuick:
-            event.notes.some(
-              (note) =>
-                note.duration / playbackRate < PRACTICE_QUICK_INTERVAL_SECONDS,
-            ) ||
-            (lineStart + index > 0 &&
-              (event.start -
-                practiceSession.events[lineStart + index - 1]!.start) /
-                playbackRate <
-                PRACTICE_QUICK_INTERVAL_SECONDS),
-          notes: event.notes.map((note) => {
-            const bindings = keyboardBindingsForOctaveLevel(
-              practiceSession.fixedOctaveLevel ??
-                practiceSession.octaveLevels[lineStart + index] ??
-                keyboardOctaveLevel,
-            )
-            const binding = bindings.find((item) => item.pitch === note.pitch)
+        .map((event, index) => {
+          const eventIndex = lineStart + index
+          const previousEvent = practiceSession.events[eventIndex - 1]
 
-            return {
-              keyLabel: binding?.label ?? '?',
-            }
-          }),
-        })),
+          return {
+            isCompleted: eventIndex < nextEventIndex,
+            isPrevious: eventIndex === nextEventIndex - 1,
+            isCurrent: eventIndex === currentEventIndex,
+            isQuick:
+              previousEvent !== undefined &&
+              (event.start - previousEvent.start) / playbackRate <
+                PRACTICE_QUICK_INTERVAL_SECONDS,
+            notes: event.notes.map((note) => {
+              const bindings = keyboardBindingsForOctaveLevel(
+                practiceSession.fixedOctaveLevel ??
+                  practiceSession.octaveLevels[eventIndex] ??
+                  keyboardOctaveLevel,
+              )
+              const binding = bindings.find((item) => item.pitch === note.pitch)
+
+              return {
+                keyLabel: binding?.label ?? '?',
+              }
+            }),
+          }
+        }),
     }
   }, [currentTime, keyboardOctaveLevel, playbackRate, practiceSession])
 
@@ -462,13 +490,16 @@ function App() {
         | (MidiTransport & { setTrackSoundOverrides?: unknown })
         | null
     )?.setTrackSoundOverrides === 'function' &&
-    transportRef.current?.revision === 8
+    transportRef.current?.revision === 14
 
   if (!transportHasTrackSoundOverrides) {
     const transport = new MidiTransport((endedAt) => {
       setCurrentTime(endedAt)
       setIsPlaying(false)
       setIsOverview(true)
+      setCompletedContrapunctusDemo(
+        demonstrationPieceRef.current === 'contrapunctus',
+      )
       setDemonstrationPiece(null)
     })
 
@@ -511,14 +542,17 @@ function App() {
     duetTwoLeadInRef.current = false
     heldKeyboardPitchesRef.current.clear()
     practiceMatchedPitchesRef.current.clear()
-    if (activePiece === 'contrapunctus') {
-      transportRef.current?.stopDuetThree()
-    } else {
-      transportRef.current?.stop()
+    if (
+      activePiece &&
+      practicePieces[activePiece].usesIndependentAccompaniment
+    ) {
+      transportRef.current?.clearTrackPianoBank()
     }
+    transportRef.current?.stop()
     setPracticeSession(null)
     setIsDuetTwoLeadIn(false)
     setDemonstrationPiece(null)
+    setCompletedContrapunctusDemo(false)
     setActiveGameMenu(null)
     setPressedKeyboardPitches(new Set())
     setPressedKeyboardCodes(new Set())
@@ -735,11 +769,21 @@ function App() {
 
     void (async () => {
       try {
-        await transport.playPracticeNotes(
-          runningSession.companionNotes,
-          segmentStart,
-          segmentEnd,
-        )
+        if (
+          practicePieces[runningSession.piece].usesIndependentAccompaniment
+        ) {
+          transport.playTrackPianoBank(
+            runningSession.companionNotes,
+            segmentStart,
+            segmentEnd,
+          )
+        } else {
+          await transport.playPracticeNotes(
+            runningSession.companionNotes,
+            segmentStart,
+            segmentEnd,
+          )
+        }
       } catch (caughtError) {
         if (practiceRef.current?.runId === runningSession.runId) {
           setError(
@@ -840,6 +884,187 @@ function App() {
       practiceFrameRef.current = window.requestAnimationFrame(advanceFrame)
     })()
   }, [applyKeyboardOctave, clearPracticeSession, playbackRate])
+
+  const resumePracticeFromPause = useCallback(() => {
+    const session = practiceRef.current
+    const transport = transportRef.current
+
+    if (!session || !transport || session.status !== 'paused') {
+      return
+    }
+
+    const segmentStart = Math.min(
+      Math.max(currentTimeRef.current, 0),
+      session.duration,
+    )
+    const nextEvent = session.events[session.gateIndex]
+    const segmentEnd = nextEvent?.start ?? session.duration
+
+    if (segmentEnd <= segmentStart + 0.001) {
+      const nextSession: PracticeSession = nextEvent
+        ? { ...session, status: 'waiting' }
+        : {
+            ...session,
+            gateIndex: session.events.length,
+            status: 'complete',
+          }
+
+      practiceRef.current = nextSession
+      practiceMatchedPitchesRef.current.clear()
+      setPracticeSession(nextSession)
+
+      if (
+        nextSession.status === 'waiting' &&
+        practicePieces[nextSession.piece].automaticallySwitchOctaves
+      ) {
+        applyKeyboardOctave(
+          nextSession.octaveLevels[nextSession.gateIndex] ??
+            keyboardOctaveLevelRef.current,
+        )
+      }
+      return
+    }
+
+    const runningSession: PracticeSession = {
+      ...session,
+      status: 'resuming',
+    }
+    practiceRef.current = runningSession
+    setPracticeSession(runningSession)
+
+    void (async () => {
+      try {
+        if (
+          practicePieces[runningSession.piece].usesIndependentAccompaniment
+        ) {
+          await transport.prepareTrackPianoBank(runningSession.companionNotes)
+        }
+
+        if (practiceRef.current?.runId !== runningSession.runId) {
+          return
+        }
+
+        if (
+          practicePieces[runningSession.piece].usesIndependentAccompaniment
+        ) {
+          transport.playTrackPianoBank(
+            runningSession.companionNotes,
+            segmentStart,
+            segmentEnd,
+          )
+        } else {
+          await transport.playPracticeNotes(
+            runningSession.companionNotes,
+            segmentStart,
+            segmentEnd,
+          )
+        }
+
+        if (practiceRef.current?.runId !== runningSession.runId) {
+          return
+        }
+
+        const startedAt = performance.now()
+        const durationMs = Math.max(
+          1,
+          ((segmentEnd - segmentStart) / playbackRate) * 1000,
+        )
+
+        currentTimeRef.current = segmentStart
+        lastPracticeUiUpdateRef.current = startedAt
+
+        const advanceFrame = (now: number) => {
+          if (practiceRef.current?.runId !== runningSession.runId) {
+            return
+          }
+
+          const progress = Math.min(
+            Math.max((now - startedAt) / durationMs, 0),
+            1,
+          )
+          const nextTime =
+            segmentStart + (segmentEnd - segmentStart) * progress
+          currentTimeRef.current = nextTime
+
+          if (
+            progress >= 1 ||
+            now - lastPracticeUiUpdateRef.current >= 100
+          ) {
+            lastPracticeUiUpdateRef.current = now
+            setCurrentTime(nextTime)
+          }
+
+          if (progress < 1) {
+            practiceFrameRef.current = window.requestAnimationFrame(advanceFrame)
+            return
+          }
+
+          practiceFrameRef.current = null
+          const activeSession = practiceRef.current
+
+          if (!activeSession) {
+            return
+          }
+
+          const nextSession: PracticeSession = nextEvent
+            ? {
+                ...activeSession,
+                status: 'waiting',
+              }
+            : {
+                ...activeSession,
+                gateIndex: activeSession.events.length,
+                status: 'complete',
+              }
+
+          practiceRef.current = nextSession
+          practiceMatchedPitchesRef.current.clear()
+
+          if (
+            nextSession.status === 'waiting' &&
+            practicePieces[nextSession.piece].automaticallySwitchOctaves
+          ) {
+            applyKeyboardOctave(
+              nextSession.octaveLevels[nextSession.gateIndex] ??
+                keyboardOctaveLevelRef.current,
+            )
+          }
+
+          if (nextSession.status === 'waiting') {
+            const nextPracticeEvent =
+              nextSession.events[nextSession.gateIndex]
+
+            nextPracticeEvent?.notes.forEach((note) => {
+              if (heldKeyboardPitchesRef.current.has(note.pitch)) {
+                practiceMatchedPitchesRef.current.add(note.pitch)
+              }
+            })
+          }
+
+          setPracticeSession(nextSession)
+
+          if (nextSession.status === 'waiting') {
+            window.setTimeout(advancePractice, 0)
+          }
+        }
+
+        practiceFrameRef.current = window.requestAnimationFrame(advanceFrame)
+      } catch (caughtError) {
+        if (practiceRef.current?.runId === runningSession.runId) {
+          setError(
+            caughtError instanceof Error
+              ? caughtError.message
+              : 'Could not continue Duet.',
+          )
+          clearPracticeSession()
+        }
+      } finally {
+        if (practiceRef.current?.runId === runningSession.runId) {
+          setIsPreparing(false)
+        }
+      }
+    })()
+  }, [applyKeyboardOctave, advancePractice, clearPracticeSession, playbackRate])
 
   useEffect(() => {
     if (!demonstrationPiece || !sourceMidi) {
@@ -1110,6 +1335,46 @@ function App() {
   }, [advancePractice, isPlaying, isPreparing, keyboardOctaveLevel, midi])
 
   useEffect(() => {
+    const handleGoldInkToggle = (event: KeyboardEvent) => {
+      if (
+        event.code !== 'Digit0' ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        isEditableKeyboardTarget(event.target) ||
+        sourceKind !== 'midi' ||
+        !midi ||
+        practiceRef.current ||
+        demonstrationPieceRef.current
+      ) {
+        return
+      }
+
+      event.preventDefault()
+
+      if (!event.repeat) {
+        setGoldInkMode((active) => !active)
+      }
+    }
+
+    window.addEventListener('keydown', handleGoldInkToggle)
+
+    return () => {
+      window.removeEventListener('keydown', handleGoldInkToggle)
+    }
+  }, [midi, sourceKind])
+
+  useEffect(() => {
+    const root = document.documentElement
+
+    root.classList.toggle('gold-ink-mode', goldInkModeActive)
+
+    return () => {
+      root.classList.remove('gold-ink-mode')
+    }
+  }, [goldInkModeActive])
+
+  useEffect(() => {
     const handleFullscreenChange = () => {
       setIsZen(Boolean(document.fullscreenElement))
     }
@@ -1275,6 +1540,9 @@ function App() {
       }
 
       playRequestIdRef.current += 1
+      if (piece.usesIndependentAccompaniment) {
+        transport.beginSeek()
+      }
       transport.stop()
       transport.setPieceGain(
         piece.id === 'contrapunctus' ? CONTRAPUNCTUS_PLAYBACK_GAIN : 1,
@@ -1303,7 +1571,12 @@ function App() {
 
       try {
         await Promise.all([
-          transport.preparePractice(),
+          piece.usesIndependentAccompaniment
+            ? Promise.all([
+                transport.preparePractice(),
+                transport.prepareTrackPianoBank(session.companionNotes),
+              ]).then(() => undefined)
+            : transport.preparePractice(),
           piece.automaticallySwitchOctaves
             ? transport.prepareKeyboardOctaves(octaveLevels)
             : transport.prepareKeyboardOctave(nextOctaveLevel),
@@ -1316,11 +1589,19 @@ function App() {
         if (needsDuetTwoLeadIn && firstEvent) {
           duetTwoLeadInRef.current = true
           setIsDuetTwoLeadIn(true)
-          await transport.playPracticeNotes(
-            session.companionNotes,
-            0,
-            firstEvent.start,
-          )
+          if (piece.usesIndependentAccompaniment) {
+            transport.playTrackPianoBank(
+              session.companionNotes,
+              0,
+              firstEvent.start,
+            )
+          } else {
+            await transport.playPracticeNotes(
+              session.companionNotes,
+              0,
+              firstEvent.start,
+            )
+          }
 
           if (practiceRef.current?.runId !== runId) {
             return
@@ -1412,14 +1693,18 @@ function App() {
     forcedStartAt?: number,
     midiOverride?: ParsedMidi,
   ) => {
+    if (practiceRef.current) {
+      resumePracticeFromPause()
+      return
+    }
+
     const transport = transportRef.current
     const playableMidi = midiOverride ?? midi
 
     if (
       !playableMidi ||
       !transport ||
-      (!midiOverride && isPreparing) ||
-      practiceRef.current
+      (!midiOverride && isPreparing)
     ) {
       return
     }
@@ -1471,7 +1756,7 @@ function App() {
         setIsPreparing(false)
       }
     }
-  }, [currentTime, isOverview, isPreparing, midi])
+  }, [currentTime, isOverview, isPreparing, midi, resumePracticeFromPause])
 
   const handleStartDemonstration = useCallback((
     pieceId: PracticePieceId,
@@ -1501,6 +1786,7 @@ function App() {
       : initialOctaveLevel
 
     setActiveGameMenu(null)
+    setCompletedContrapunctusDemo(false)
     setDemonstrationPiece(piece.id)
     transportRef.current?.setPieceGain(
       piece.id === 'contrapunctus' ? CONTRAPUNCTUS_PLAYBACK_GAIN : 1,
@@ -1599,8 +1885,42 @@ function App() {
     const transport = transportRef.current
 
     if (practiceRef.current) {
-      clearPracticeSession()
-      setCurrentTime(0)
+      const session = practiceRef.current
+      const nextGateIndex =
+        session.status === 'running'
+          ? Math.min(session.gateIndex + 1, session.events.length)
+          : session.gateIndex
+      const pausedSession: PracticeSession = {
+        ...session,
+        runId: ++practiceRunIdRef.current,
+        gateIndex: nextGateIndex,
+        status: 'paused',
+      }
+
+      if (practiceFrameRef.current !== null) {
+        window.cancelAnimationFrame(practiceFrameRef.current)
+        practiceFrameRef.current = null
+      }
+
+      if (duetTwoLeadInFrameRef.current !== null) {
+        window.cancelAnimationFrame(duetTwoLeadInFrameRef.current)
+        duetTwoLeadInFrameRef.current = null
+      }
+
+      duetTwoLeadInRef.current = false
+      setIsDuetTwoLeadIn(false)
+      heldKeyboardPitchesRef.current.clear()
+      practiceMatchedPitchesRef.current.clear()
+      setPressedKeyboardPitches(new Set())
+      setPressedKeyboardCodes(new Set())
+      practiceRef.current = pausedSession
+      setPracticeSession(pausedSession)
+      transport?.beginSeek({
+        preserveMainPiano:
+          practicePieces[session.piece].usesIndependentAccompaniment,
+      })
+      setCurrentTime(currentTimeRef.current)
+      setIsPlaying(false)
       setIsPreparing(false)
       setIsOverview(false)
       return
@@ -1628,30 +1948,168 @@ function App() {
     }
 
     playRequestIdRef.current += 1
-    if (demonstrationPiece === 'contrapunctus') {
-      transportRef.current?.stopDuetThree()
-    } else {
-      transportRef.current?.stop()
+    if (
+      demonstrationPiece &&
+      practicePieces[demonstrationPiece].usesIndependentAccompaniment
+    ) {
+      transportRef.current?.clearTrackPianoBank()
     }
+    transportRef.current?.stop()
     setCurrentTime(0)
     setIsPlaying(false)
     setIsPreparing(false)
     setIsOverview(false)
     setDemonstrationPiece(null)
+    setCompletedContrapunctusDemo(false)
   }, [clearPracticeSession, demonstrationPiece])
 
-  const handleSeek = useCallback((time: number) => {
-    if (practiceRef.current) {
-      return
+  const handleSeekStart = useCallback(() => {
+    const session = practiceRef.current
+    seekWasPlayingRef.current = isPlaying
+
+    if (session) {
+      const pausedSession: PracticeSession = {
+        ...session,
+        runId: ++practiceRunIdRef.current,
+        status: 'paused',
+      }
+
+      if (practiceFrameRef.current !== null) {
+        window.cancelAnimationFrame(practiceFrameRef.current)
+        practiceFrameRef.current = null
+      }
+
+      if (duetTwoLeadInFrameRef.current !== null) {
+        window.cancelAnimationFrame(duetTwoLeadInFrameRef.current)
+        duetTwoLeadInFrameRef.current = null
+      }
+
+      duetTwoLeadInRef.current = false
+      setIsDuetTwoLeadIn(false)
+      heldKeyboardPitchesRef.current.clear()
+      practiceMatchedPitchesRef.current.clear()
+      practiceRef.current = pausedSession
+      setPracticeSession(pausedSession)
+      setPressedKeyboardPitches(new Set())
+      setPressedKeyboardCodes(new Set())
     }
 
-    transportRef.current?.seek(time)
+    transportRef.current?.beginSeek({
+      preserveMainPiano:
+        session !== null &&
+        practicePieces[session.piece].usesIndependentAccompaniment,
+    })
+    setIsPlaying(false)
+  }, [isPlaying])
+
+  const handleSeekPreview = useCallback((time: number) => {
+    currentTimeRef.current = time
     setCurrentTime(time)
     setIsOverview(false)
   }, [])
 
+  const handleSeekCommit = useCallback((time: number) => {
+    const session = practiceRef.current
+
+    if (session) {
+      const nextGateIndex = session.events.findIndex(
+        (event) => event.start >= time,
+      )
+      const nextEvent =
+        nextGateIndex === -1 ? undefined : session.events[nextGateIndex]
+      const isAtGate =
+        nextEvent !== undefined && Math.abs(nextEvent.start - time) < 0.02
+      const nextStatus: PracticeStatus =
+        nextGateIndex === -1 && time >= session.duration
+          ? 'complete'
+          : isAtGate
+            ? 'waiting'
+            : 'paused'
+      const nextSession: PracticeSession = {
+        ...session,
+        gateIndex:
+          nextGateIndex === -1 ? session.events.length : nextGateIndex,
+        status: nextStatus,
+      }
+
+      const needsTrackPianoBank =
+        practicePieces[session.piece].usesIndependentAccompaniment &&
+        nextStatus !== 'complete'
+      const activeSession: PracticeSession = needsTrackPianoBank
+        ? { ...nextSession, status: 'preparing' }
+        : nextSession
+
+      practiceRef.current = activeSession
+      setPracticeSession(activeSession)
+
+      const finalizeSeek = () => {
+        if (practiceRef.current?.runId !== activeSession.runId) {
+          return
+        }
+
+        practiceRef.current = nextSession
+        setPracticeSession(nextSession)
+
+        if (
+          nextStatus === 'waiting' &&
+          practicePieces[nextSession.piece].automaticallySwitchOctaves
+        ) {
+          applyKeyboardOctave(
+            nextSession.octaveLevels[nextSession.gateIndex] ??
+              keyboardOctaveLevelRef.current,
+            false,
+          )
+        }
+
+        if (nextStatus === 'paused') {
+          resumePracticeFromPause()
+        }
+      }
+
+      if (needsTrackPianoBank) {
+        setIsPreparing(true)
+        void transportRef.current
+          ?.prepareTrackPianoBank(activeSession.companionNotes)
+          .then(finalizeSeek)
+          .catch((caughtError) => {
+            if (practiceRef.current?.runId !== activeSession.runId) {
+              return
+            }
+
+            setError(
+              caughtError instanceof Error
+                ? caughtError.message
+                : 'Could not prepare accompaniment.',
+            )
+            clearPracticeSession()
+          })
+          .finally(() => {
+            if (practiceRef.current?.runId === activeSession.runId) {
+              setIsPreparing(false)
+            }
+          })
+      } else {
+        finalizeSeek()
+      }
+    }
+
+    setCurrentTime(time)
+    setIsOverview(false)
+    const resumePlayback = seekWasPlayingRef.current && !session
+    seekWasPlayingRef.current = false
+
+    void transportRef.current?.finishSeek(time, resumePlayback).then(() => {
+      if (resumePlayback) {
+        setIsPlaying(true)
+      }
+    })
+  }, [applyKeyboardOctave, clearPracticeSession, resumePracticeFromPause])
+
   const handlePlaybackRateChange = useCallback((rate: PlaybackRate) => {
-    if (practiceRef.current?.status === 'running') {
+    if (
+      practiceRef.current?.status === 'running' ||
+      practiceRef.current?.status === 'resuming'
+    ) {
       return
     }
 
@@ -1782,10 +2240,7 @@ function App() {
   }, [currentTime, isPlaying, isPreparing, midi])
 
   const getTransportTime = useCallback(() => {
-    if (
-      practiceRef.current?.status === 'running' ||
-      duetTwoLeadInRef.current
-    ) {
+    if (practiceRef.current || duetTwoLeadInRef.current) {
       return currentTimeRef.current
     }
 
@@ -1793,7 +2248,18 @@ function App() {
   }, [])
 
   return (
-    <main className={isZen ? 'app-shell is-zen' : 'app-shell'} ref={appRef}>
+    <main
+      className={
+        goldInkModeActive
+          ? isZen
+            ? 'app-shell is-zen is-gold-ink-mode'
+            : 'app-shell is-gold-ink-mode'
+          : isZen
+            ? 'app-shell is-zen'
+            : 'app-shell'
+      }
+      ref={appRef}
+    >
       <header className="topbar">
         <div className="game-controls">
           {Object.values(practicePieces).map((piece) => (
@@ -1902,6 +2368,7 @@ function App() {
             centerSymmetryEnabled={centerSymmetryEnabled && sourceKind === 'midi'}
             showChromaticLines={showChromaticLines}
             showStaffLines={showStaffLines}
+            goldInkMode={goldInkModeActive}
             highlightedPitches={pressedKeyboardPitches}
             keyboardOctaveLevel={keyboardOctaveLevel}
             pressedKeyboardCodes={
@@ -1927,6 +2394,7 @@ function App() {
         <Controls
             disabled={!midi}
             practiceActive={Boolean(practiceSession)}
+            practicePaused={practiceSession?.status === 'paused'}
             demonstrationActive={isDemonstration}
             practiceRateLocked={isPracticeAnimating}
             isPlaying={isPlaying}
@@ -1953,7 +2421,9 @@ function App() {
             onPause={handlePause}
             onStop={handleStop}
             onToggleReversePlayback={handleToggleReversePlayback}
-            onSeek={handleSeek}
+            onSeekStart={handleSeekStart}
+            onSeekPreview={handleSeekPreview}
+            onSeekCommit={handleSeekCommit}
             onSoundPresetChange={setSoundPreset}
             onPlaybackRateChange={handlePlaybackRateChange}
             onVolumeChange={setVolume}

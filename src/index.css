@@ -49,6 +49,23 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+:root.gold-ink-mode {
+  --bg: #030302;
+  --paper: #030302;
+  --paper-edge: rgba(229, 184, 70, 0.28);
+  --text: #f0ce79;
+  --muted: rgba(232, 194, 112, 0.68);
+  --soft: rgba(232, 194, 112, 0.46);
+  --line: rgba(229, 184, 70, 0.22);
+  --button: rgba(27, 21, 8, 0.88);
+  --button-active: rgba(102, 76, 20, 0.72);
+  --focus: #e5b846;
+  --danger: #ef916b;
+  --shadow: rgba(0, 0, 0, 0.62) 0 22px 60px;
+  color-scheme: dark;
+  background: #030302;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -57,6 +74,15 @@ body {
   min-width: 320px;
   min-height: 100svh;
   margin: 0;
+}
+
+:root.gold-ink-mode body,
+:root.gold-ink-mode #root {
+  background: #030302;
+}
+
+:root.gold-ink-mode body {
+  overflow: hidden;
 }
 
 button,
@@ -95,6 +121,42 @@ label:focus-within {
   height: 100vh;
   padding: 18px;
   background: var(--bg);
+}
+
+.app-shell.is-gold-ink-mode:fullscreen {
+  padding: 0;
+  background: #030302;
+}
+
+.app-shell.is-gold-ink-mode {
+  display: block;
+  width: 100vw;
+  height: 100svh;
+  min-height: 100svh;
+  margin: 0;
+  padding: 0;
+}
+
+.app-shell.is-gold-ink-mode .topbar,
+.app-shell.is-gold-ink-mode .controls-anchor,
+.app-shell.is-gold-ink-mode .error-line,
+.app-shell.is-gold-ink-mode .clef-rail,
+.app-shell.is-gold-ink-mode .keyboard-index {
+  display: none;
+}
+
+.app-shell.is-gold-ink-mode .visual-stage,
+.app-shell.is-gold-ink-mode .canvas-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+}
+
+.app-shell.is-gold-ink-mode .canvas-frame {
+  border: 0;
+  border-radius: 0;
+  background: #030302;
+  box-shadow: none;
 }
 
 .loading-icon {
@@ -445,6 +507,10 @@ p {
 
 .practice-sequence__event.is-completed {
   opacity: 0.25;
+}
+
+.practice-sequence__event.is-previous {
+  visibility: hidden;
 }
 
 .practice-sequence__event.is-quick:not(.is-current) {
