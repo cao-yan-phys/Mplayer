@@ -1,5 +1,21 @@
 import { FileText, Music2, RotateCcw, Upload } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useRef, type ReactNode } from 'react'
+
+type FilePickerHandle = {
+  getFile: () => Promise<File>
+}
+
+type FilePickerOptions = {
+  multiple: boolean
+  types: Array<{
+    description: string
+    accept: Record<string, string[]>
+  }>
+}
+
+type FilePickerWindow = Window & {
+  showOpenFilePicker?: (options: FilePickerOptions) => Promise<FilePickerHandle[]>
+}
 
 interface MidiDropzoneProps {
   accept: string
@@ -28,11 +44,46 @@ export function MidiDropzone({
   onFile,
   onLoadDefault,
 }: MidiDropzoneProps) {
-  const handleFiles = (files: FileList | null) => {
-    const file = files?.[0]
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
+  const handleFile = (file: File | undefined) => {
     if (file && isSupportedFile(file)) {
       onFile(file)
+    }
+  }
+
+  const handleFiles = (files: FileList | null) => {
+    handleFile(files?.[0])
+  }
+
+  const openFilePicker = async () => {
+    const showOpenFilePicker = (window as FilePickerWindow).showOpenFilePicker
+
+    if (!showOpenFilePicker) {
+      fileInputRef.current?.click()
+      return
+    }
+
+    try {
+      const pickerType: FilePickerOptions['types'][number] =
+        kind === 'csv'
+          ? {
+              description: 'csv',
+              accept: { 'text/csv': ['.csv'] },
+            }
+          : {
+              description: 'midi',
+              accept: { 'audio/midi': ['.mid', '.midi'] },
+            }
+      const [handle] = await showOpenFilePicker({
+        multiple: false,
+        types: [pickerType],
+      })
+      handleFile(await handle.getFile())
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        fileInputRef.current?.click()
+      }
     }
   }
 
@@ -44,6 +95,10 @@ export function MidiDropzone({
     <div className="dropzone-wrap">
       <label
         className={isActive ? 'dropzone is-active' : 'dropzone'}
+        onClick={(event) => {
+          event.preventDefault()
+          void openFilePicker()
+        }}
         onDragOver={(event) => {
           event.preventDefault()
         }}
@@ -53,6 +108,7 @@ export function MidiDropzone({
         }}
       >
         <input
+          ref={fileInputRef}
           type="file"
           accept={accept}
           onChange={(event) => handleFiles(event.currentTarget.files)}

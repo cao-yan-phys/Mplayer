@@ -55,6 +55,11 @@ const PRACTICE_SEQUENCE_LENGTH = 10
 const PRACTICE_QUICK_INTERVAL_SECONDS = 0.3
 const CONTRAPUNCTUS_PLAYBACK_GAIN = 0.55
 const BACH_CUTOFF_SECONDS = 478
+const CONTRAPUNCTUS_SUBJECT_ENTRY_MARKERS = [
+  { label: '1', time: 1 },
+  { label: '2', time: 226.5 },
+  { label: '3', time: 385 },
+]
 
 type SourceKind = 'midi' | 'csv'
 
@@ -242,8 +247,12 @@ function PracticeSequence({
       {sequence.timingProgress !== null ? (
         <div className="practice-sequence__timing" aria-hidden="true">
           <div
-            className="practice-sequence__timing-fill"
-            style={{ width: `${sequence.timingProgress * 100}%` }}
+            className="practice-sequence__timing-fill practice-sequence__timing-fill--leading"
+            style={{ width: `${sequence.timingProgress * 50}%` }}
+          />
+          <div
+            className="practice-sequence__timing-fill practice-sequence__timing-fill--trailing"
+            style={{ width: `${sequence.timingProgress * 50}%` }}
           />
         </div>
       ) : null}
@@ -269,6 +278,7 @@ function App() {
   const [showChromaticLines, setShowChromaticLines] = useState(true)
   const [showStaffLines, setShowStaffLines] = useState(true)
   const [goldInkMode, setGoldInkMode] = useState(false)
+  const [liquidScoreMode, setLiquidScoreMode] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isZen, setIsZen] = useState(false)
   const [isOverview, setIsOverview] = useState(false)
@@ -314,6 +324,11 @@ function App() {
   const isDemonstration = demonstrationPiece !== null
   const goldInkModeActive =
     goldInkMode &&
+    sourceKind === 'midi' &&
+    !practiceSession &&
+    !isDemonstration
+  const liquidScoreModeActive =
+    liquidScoreMode &&
     sourceKind === 'midi' &&
     !practiceSession &&
     !isDemonstration
@@ -1078,11 +1093,22 @@ function App() {
       return
     }
 
-    const events = createPracticeEvents(
-      sourceMidi.notes.filter((note) => note.track === tracks.upper),
-    )
     const demonstrationVoice: PracticeVoice =
-      piece.trackLayout === 'all' ? 'sound1' : 'upper'
+      piece.trackLayout === 'all' ? 'sound3' : 'upper'
+    const demonstrationTrack = trackForPracticeVoice(
+      piece,
+      sourceMidi,
+      demonstrationVoice,
+      tracks,
+    )
+
+    if (demonstrationTrack === undefined) {
+      return
+    }
+
+    const events = createPracticeEvents(
+      sourceMidi.notes.filter((note) => note.track === demonstrationTrack),
+    )
     const initialOctaveLevel = defaultOctaveLevelForVoice(
       piece,
       demonstrationVoice,
@@ -1121,13 +1147,27 @@ function App() {
       return new Set<string>()
     }
 
+    const piece = practicePieces[demonstrationPiece]
+    const demonstrationVoice: PracticeVoice =
+      piece.trackLayout === 'all' ? 'sound3' : 'upper'
+    const demonstrationTrack = trackForPracticeVoice(
+      piece,
+      sourceMidi,
+      demonstrationVoice,
+      tracks,
+    )
+
+    if (demonstrationTrack === undefined) {
+      return new Set<string>()
+    }
+
     const bindings = keyboardBindingsForOctaveLevel(keyboardOctaveLevel)
 
     return new Set(
       sourceMidi.notes
         .filter(
           (note) =>
-            note.track === tracks.upper &&
+            note.track === demonstrationTrack &&
             note.start <= currentTime + 0.0001 &&
             note.end > currentTime - 0.0001,
         )
@@ -1354,6 +1394,7 @@ function App() {
 
       if (!event.repeat) {
         setGoldInkMode((active) => !active)
+        setLiquidScoreMode(false)
       }
     }
 
@@ -1361,6 +1402,37 @@ function App() {
 
     return () => {
       window.removeEventListener('keydown', handleGoldInkToggle)
+    }
+  }, [midi, sourceKind])
+
+  useEffect(() => {
+    const handleLiquidScoreToggle = (event: KeyboardEvent) => {
+      if (
+        event.code !== 'Digit9' ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        isEditableKeyboardTarget(event.target) ||
+        sourceKind !== 'midi' ||
+        !midi ||
+        practiceRef.current ||
+        demonstrationPieceRef.current
+      ) {
+        return
+      }
+
+      event.preventDefault()
+
+      if (!event.repeat) {
+        setLiquidScoreMode((active) => !active)
+        setGoldInkMode(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleLiquidScoreToggle)
+
+    return () => {
+      window.removeEventListener('keydown', handleLiquidScoreToggle)
     }
   }, [midi, sourceKind])
 
@@ -1373,6 +1445,16 @@ function App() {
       root.classList.remove('gold-ink-mode')
     }
   }, [goldInkModeActive])
+
+  useEffect(() => {
+    const root = document.documentElement
+
+    root.classList.toggle('liquid-score-mode', liquidScoreModeActive)
+
+    return () => {
+      root.classList.remove('liquid-score-mode')
+    }
+  }, [liquidScoreModeActive])
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -1767,13 +1849,25 @@ function App() {
     const tracks = demonstrationMidi
       ? practiceTracksForPiece(piece, demonstrationMidi)
       : null
-    const events = tracks && demonstrationMidi
-      ? createPracticeEvents(
-          demonstrationMidi.notes.filter((note) => note.track === tracks.upper),
-        )
-      : []
     const demonstrationVoice: PracticeVoice =
-      piece.trackLayout === 'all' ? 'sound1' : 'upper'
+      piece.trackLayout === 'all' ? 'sound3' : 'upper'
+    const demonstrationTrack =
+      tracks && demonstrationMidi
+        ? trackForPracticeVoice(
+            piece,
+            demonstrationMidi,
+            demonstrationVoice,
+            tracks,
+          )
+        : undefined
+    const events =
+      demonstrationMidi && demonstrationTrack !== undefined
+        ? createPracticeEvents(
+            demonstrationMidi.notes.filter(
+              (note) => note.track === demonstrationTrack,
+            ),
+          )
+        : []
     const initialOctaveLevel = defaultOctaveLevelForVoice(
       piece,
       demonstrationVoice,
@@ -1936,6 +2030,40 @@ function App() {
     setIsPlaying(false)
     setIsPreparing(false)
   }, [clearPracticeSession])
+
+  useEffect(() => {
+    const handlePlaybackShortcut = (event: KeyboardEvent) => {
+      if (
+        event.code !== 'Backspace' ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        !midi ||
+        isPreparing
+      ) {
+        return
+      }
+
+      event.preventDefault()
+
+      if (event.repeat) {
+        return
+      }
+
+      if (isPlaying) {
+        handlePause()
+        return
+      }
+
+      void handlePlay()
+    }
+
+    window.addEventListener('keydown', handlePlaybackShortcut)
+
+    return () => {
+      window.removeEventListener('keydown', handlePlaybackShortcut)
+    }
+  }, [handlePause, handlePlay, isPlaying, isPreparing, midi])
 
   const handleStop = useCallback(() => {
     if (practiceRef.current) {
@@ -2254,9 +2382,13 @@ function App() {
           ? isZen
             ? 'app-shell is-zen is-gold-ink-mode'
             : 'app-shell is-gold-ink-mode'
-          : isZen
-            ? 'app-shell is-zen'
-            : 'app-shell'
+          : liquidScoreModeActive
+            ? isZen
+              ? 'app-shell is-zen is-liquid-score-mode'
+              : 'app-shell is-liquid-score-mode'
+            : isZen
+              ? 'app-shell is-zen'
+              : 'app-shell'
       }
       ref={appRef}
     >
@@ -2332,7 +2464,7 @@ function App() {
           }}
         />
         <MidiDropzone
-          accept=".csv"
+          accept="text/csv"
           defaultFileName={defaultCsvFileName}
           emptyHint={
             <>
@@ -2369,6 +2501,7 @@ function App() {
             showChromaticLines={showChromaticLines}
             showStaffLines={showStaffLines}
             goldInkMode={goldInkModeActive}
+            liquidScoreMode={liquidScoreModeActive}
             highlightedPitches={pressedKeyboardPitches}
             keyboardOctaveLevel={keyboardOctaveLevel}
             pressedKeyboardCodes={
@@ -2403,6 +2536,11 @@ function App() {
             isZen={isZen}
             currentTime={currentTime}
             duration={midi?.duration ?? 0}
+            progressMarkers={
+              demonstrationPiece === 'contrapunctus'
+                ? CONTRAPUNCTUS_SUBJECT_ENTRY_MARKERS
+                : []
+            }
             soundPreset={soundPreset}
             reversePlayback={reversePlayback}
             playbackRate={playbackRate}

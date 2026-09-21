@@ -41,6 +41,10 @@ interface ControlsProps {
   isZen: boolean
   currentTime: number
   duration: number
+  progressMarkers: ReadonlyArray<{
+    label: string
+    time: number
+  }>
   soundPreset: SoundPreset
   reversePlayback: boolean
   playbackRate: PlaybackRate
@@ -126,6 +130,7 @@ export function Controls({
   isZen,
   currentTime,
   duration,
+  progressMarkers,
   soundPreset,
   reversePlayback,
   playbackRate,
@@ -381,36 +386,59 @@ export function Controls({
           </button>
         ) : null}
         <div className="progress-group">
-          <input
-            className="progress"
-            type="range"
-            min={0}
-            max={Math.max(duration, 0.01)}
-            step={0.01}
-            value={progressTime}
-            disabled={disabled || isPreparing}
-            aria-label="Playback progress"
-            onChange={(event) => {
-              const time = Number(event.currentTarget.value)
+          <div className="progress-track">
+            <input
+              className="progress"
+              type="range"
+              min={0}
+              max={Math.max(duration, 0.01)}
+              step={0.01}
+              value={progressTime}
+              disabled={disabled || isPreparing}
+              aria-label="Playback progress"
+              onChange={(event) => {
+                const time = Number(event.currentTarget.value)
 
-              if (!isSeekingRef.current) {
-                beginSeek()
+                if (!isSeekingRef.current) {
+                  beginSeek()
+                  onSeekPreview(time)
+                  commitSeek(time, event.currentTarget)
+                  return
+                }
+
+                setSeekPreviewTime(time)
                 onSeekPreview(time)
-                commitSeek(time, event.currentTarget)
-                return
+              }}
+              onPointerDown={beginSeek}
+              onPointerUp={(event) =>
+                commitSeek(Number(event.currentTarget.value), event.currentTarget)
               }
+              onPointerCancel={(event) =>
+                commitSeek(Number(event.currentTarget.value), event.currentTarget)
+              }
+            />
+            {progressMarkers.map((marker, index) => {
+              const position =
+                (Math.min(Math.max(marker.time, 0), duration) /
+                  Math.max(duration, 0.01)) *
+                100
 
-              setSeekPreviewTime(time)
-              onSeekPreview(time)
-            }}
-            onPointerDown={beginSeek}
-            onPointerUp={(event) =>
-              commitSeek(Number(event.currentTarget.value), event.currentTarget)
-            }
-            onPointerCancel={(event) =>
-              commitSeek(Number(event.currentTarget.value), event.currentTarget)
-            }
-          />
+              return (
+                <span
+                  className={
+                    index === 0
+                      ? 'progress-marker progress-marker--start'
+                      : 'progress-marker'
+                  }
+                  key={marker.label}
+                  style={{ left: `${position}%` }}
+                  aria-hidden="true"
+                >
+                  <span>{marker.label}</span>
+                </span>
+              )
+            })}
+          </div>
           <span className="time-readout">
             {formatTime(currentTime)} / {formatTime(duration)}
           </span>
@@ -535,7 +563,7 @@ export function Controls({
               key={track.track}
               className={isVisible ? 'track-chip is-visible' : 'track-chip'}
               type="button"
-              disabled={controlsLocked}
+              disabled={disabled || practiceActive}
               title={`${isVisible ? 'Hide' : 'Show'} ${track.name}`}
               onClick={() => onToggleTrack(track.track)}
             >

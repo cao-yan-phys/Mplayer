@@ -4,7 +4,9 @@ import type { SubjectTrace } from '../midi/contrapunctusSubjects'
 import type { ParsedMidi } from '../midi/noteTypes'
 import type { SymmetryGroups } from '../midi/symmetryAnalysis'
 import { drawVisualizationFrame } from '../visual/drawFrame'
+import { GoldMeteorRenderer } from '../visual/goldMeteorRenderer'
 import { getInkCoordinates } from '../visual/inkRenderer'
+import { LiquidScoreRenderer } from '../visual/liquidRenderer'
 import { renderClefRail } from '../visual/clefRenderer'
 import { KeyboardIndex } from './KeyboardIndex'
 
@@ -24,6 +26,7 @@ interface CanvasViewProps {
   showChromaticLines: boolean
   showStaffLines: boolean
   goldInkMode: boolean
+  liquidScoreMode: boolean
   highlightedPitches: ReadonlySet<number>
   keyboardOctaveLevel: number
   pressedKeyboardCodes: ReadonlySet<string>
@@ -79,6 +82,7 @@ export function CanvasView({
   showChromaticLines,
   showStaffLines,
   goldInkMode,
+  liquidScoreMode,
   highlightedPitches,
   keyboardOctaveLevel,
   pressedKeyboardCodes,
@@ -93,8 +97,23 @@ export function CanvasView({
   const [size, setSize] = useState<CanvasSize>(emptySize)
   const [railSize, setRailSize] = useState<RailSize>(emptyRailSize)
   const [clefFontReady, setClefFontReady] = useState(false)
+  const [goldSkyVersion, setGoldSkyVersion] = useState(0)
   const hasStartedOverviewRef = useRef(false)
+  const goldMeteorRendererRef = useRef(new GoldMeteorRenderer())
+  const liquidScoreRendererRef = useRef(new LiquidScoreRenderer())
   const stationaryTime = isAnimating ? null : currentTime
+
+  useEffect(() => {
+    goldMeteorRendererRef.current.preloadSky(() => {
+      setGoldSkyVersion((version) => version + 1)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!liquidScoreMode) {
+      liquidScoreRendererRef.current.reset()
+    }
+  }, [liquidScoreMode])
 
   useEffect(() => {
     const frame = frameRef.current
@@ -239,6 +258,7 @@ export function CanvasView({
 
     if (
       goldInkMode ||
+      liquidScoreMode ||
       !midi ||
       !clefFontReady ||
       size.width <= 0 ||
@@ -271,6 +291,7 @@ export function CanvasView({
   }, [
     clefFontReady,
     goldInkMode,
+    liquidScoreMode,
     midi,
     railSize.height,
     railSize.width,
@@ -313,6 +334,10 @@ export function CanvasView({
         showChromaticLines,
         showStaffLines,
         goldInkMode,
+        liquidScoreMode,
+        goldMeteorRenderer: goldMeteorRendererRef.current,
+        liquidScoreRenderer: liquidScoreRendererRef.current,
+        isAnimating,
         highlightedPitches,
         keyName,
         cutoffTime,
@@ -320,7 +345,7 @@ export function CanvasView({
       })
     }
 
-    if (isOverview) {
+    if (isOverview && !liquidScoreMode) {
       if (hasStartedOverviewRef.current) {
         draw(stationaryTime ?? 0, 1)
         return
@@ -352,6 +377,28 @@ export function CanvasView({
 
     if (!isAnimating) {
       draw(stationaryTime ?? 0)
+
+      const hasActiveKeyboardVisual = () =>
+        (goldInkMode &&
+          goldMeteorRendererRef.current.hasActiveKeyboardMeteors()) ||
+        (liquidScoreMode &&
+          liquidScoreRendererRef.current.hasActiveKeyboardFlow())
+
+      if (hasActiveKeyboardVisual()) {
+        const animateKeyboardVisual = () => {
+          draw(stationaryTime ?? 0)
+
+          if (hasActiveKeyboardVisual()) {
+            frameId = window.requestAnimationFrame(animateKeyboardVisual)
+          }
+        }
+
+        frameId = window.requestAnimationFrame(animateKeyboardVisual)
+        return () => {
+          window.cancelAnimationFrame(frameId)
+        }
+      }
+
       return
     }
 
@@ -378,6 +425,8 @@ export function CanvasView({
     showChromaticLines,
     showStaffLines,
     goldInkMode,
+    goldSkyVersion,
+    liquidScoreMode,
     highlightedPitches,
     size.height,
     size.width,

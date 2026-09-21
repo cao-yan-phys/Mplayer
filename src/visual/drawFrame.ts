@@ -2,7 +2,9 @@ import type { MotifGroup } from '../midi/motifAnalysis'
 import type { SubjectTrace } from '../midi/contrapunctusSubjects'
 import type { ParsedMidi, PitchRange } from '../midi/noteTypes'
 import type { SymmetryGroups } from '../midi/symmetryAnalysis'
+import { GoldMeteorRenderer } from './goldMeteorRenderer'
 import { getInkCoordinates, renderInkFlow } from './inkRenderer'
+import { LiquidScoreRenderer } from './liquidRenderer'
 import { renderMotifTrace } from './motifRenderer'
 import { renderSubjectTraces } from './subjectRenderer'
 import { renderGrandStaff } from './staffRenderer'
@@ -26,6 +28,10 @@ interface DrawFrameOptions {
   showChromaticLines?: boolean
   showStaffLines?: boolean
   goldInkMode?: boolean
+  liquidScoreMode?: boolean
+  goldMeteorRenderer: GoldMeteorRenderer
+  liquidScoreRenderer: LiquidScoreRenderer
+  isAnimating?: boolean
   highlightedPitches?: ReadonlySet<number>
   keyboardRange?: PitchRange
   keyName?: string | null
@@ -46,14 +52,7 @@ export const drawPaperBackground = (
   width: number,
   height: number,
   currentTime: number,
-  goldInkMode = false,
 ) => {
-  if (goldInkMode) {
-    ctx.fillStyle = '#030302'
-    ctx.fillRect(0, 0, width, height)
-    return
-  }
-
   const paperSpeed = clamp(width / 13.5, 44, 92)
   const fiberSpacing = 54
   const fleckSpacing = 78
@@ -129,6 +128,10 @@ export const drawVisualizationFrame = ({
   showChromaticLines = true,
   showStaffLines = true,
   goldInkMode = false,
+  liquidScoreMode = false,
+  goldMeteorRenderer,
+  liquidScoreRenderer,
+  isAnimating = false,
   highlightedPitches = new Set<number>(),
   keyboardRange,
   keyName = null,
@@ -136,7 +139,38 @@ export const drawVisualizationFrame = ({
   showEmptyState = false,
 }: DrawFrameOptions) => {
   ctx.clearRect(0, 0, width, height)
-  drawPaperBackground(ctx, width, height, currentTime, goldInkMode)
+
+  if (liquidScoreMode && midi) {
+    liquidScoreRenderer.render({
+      ctx,
+      width,
+      height,
+      midi,
+      currentTime,
+      visibleTracks,
+      isAnimating,
+      keyboardPitches: highlightedPitches,
+    })
+    return
+  }
+
+  if (goldInkMode && midi) {
+    goldMeteorRenderer.render({
+      ctx,
+      width,
+      height,
+      notes: midi.notes,
+      duration: midi.duration,
+      pitchRange: midi.pitchRange,
+      currentTime,
+      visibleTracks,
+      isAnimating,
+      keyboardPitches: highlightedPitches,
+    })
+    return
+  }
+
+  drawPaperBackground(ctx, width, height, currentTime)
 
   if (!midi) {
     if (showEmptyState) {
@@ -149,7 +183,7 @@ export const drawVisualizationFrame = ({
     return
   }
 
-  const waveformHeight = !goldInkMode && midi.gwWaveform
+  const waveformHeight = midi.gwWaveform
     ? clamp(height * 0.24, 96, 158)
     : 0
   const inkHeight = Math.max(1, height - waveformHeight)
@@ -163,7 +197,6 @@ export const drawVisualizationFrame = ({
     overviewProgress,
     keyboardRange,
     visibleTracks,
-    goldInkMode,
   }
 
   const coordinates = getInkCoordinates({
@@ -175,19 +208,17 @@ export const drawVisualizationFrame = ({
     overviewProgress,
     keyboardRange,
   })
-  if (!goldInkMode) {
-    renderGrandStaff({
-      ctx,
-      width,
-      height: inkHeight,
-      coordinates,
-      showChromaticLines,
-      showStaffLines,
-      highlightedPitches,
-    })
-  }
+  renderGrandStaff({
+    ctx,
+    width,
+    height: inkHeight,
+    coordinates,
+    showChromaticLines,
+    showStaffLines,
+    highlightedPitches,
+  })
 
-  if (!goldInkMode && cutoffTime !== null) {
+  if (cutoffTime !== null) {
     const cutoffX = coordinates.timeToX(cutoffTime)
 
     if (cutoffX >= -1 && cutoffX <= width + 1) {
@@ -202,7 +233,7 @@ export const drawVisualizationFrame = ({
     }
   }
 
-  if (!goldInkMode && keyName) {
+  if (keyName) {
     ctx.save()
     ctx.fillStyle = 'rgba(47, 44, 39, 0.76)'
     ctx.font = '600 14px "Courier New", "Courier Prime", Courier, monospace'
@@ -214,7 +245,7 @@ export const drawVisualizationFrame = ({
 
   const inkMetrics = renderInkFlow(options)
 
-  if (!goldInkMode && subjectTraces.length > 0) {
+  if (subjectTraces.length > 0) {
     renderSubjectTraces({
       ctx,
       traces: subjectTraces,
@@ -225,7 +256,7 @@ export const drawVisualizationFrame = ({
     })
   }
 
-  if (!goldInkMode && motifTraceEnabled && motifGroups.length > 0) {
+  if (motifTraceEnabled && motifGroups.length > 0) {
     renderMotifTrace({
       ctx,
       groups: motifGroups,
@@ -236,7 +267,7 @@ export const drawVisualizationFrame = ({
     })
   }
 
-  if (!goldInkMode && axisSymmetryEnabled && symmetryGroups.axis.length > 0) {
+  if (axisSymmetryEnabled && symmetryGroups.axis.length > 0) {
     renderSymmetryTrace({
       ctx,
       occurrences: symmetryGroups.axis,
@@ -247,7 +278,7 @@ export const drawVisualizationFrame = ({
     })
   }
 
-  if (!goldInkMode && centerSymmetryEnabled && symmetryGroups.center.length > 0) {
+  if (centerSymmetryEnabled && symmetryGroups.center.length > 0) {
     renderSymmetryTrace({
       ctx,
       occurrences: symmetryGroups.center,
@@ -258,7 +289,7 @@ export const drawVisualizationFrame = ({
     })
   }
 
-  if (!goldInkMode && midi.gwWaveform) {
+  if (midi.gwWaveform) {
     renderGwWaveform({
       ctx,
       width,

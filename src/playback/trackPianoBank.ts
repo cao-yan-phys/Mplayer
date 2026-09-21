@@ -2,6 +2,8 @@ import { Piano } from '@tonejs/piano/build/piano/Piano'
 import { Filter, Gain, now as toneNow } from 'tone'
 import type { MidiNote } from '../midi/noteTypes'
 
+const AUDIO_LOOKAHEAD_SECONDS = 0.72
+
 interface PianoRange {
   minNote: number
   maxNote: number
@@ -28,8 +30,6 @@ export class TrackPianoBank {
   private schedulerGeneration = 0
 
   private schedulerTimer: number | null = null
-
-  private releaseTimers = new Set<number>()
 
   private readonly destination: Filter
 
@@ -145,10 +145,13 @@ export class TrackPianoBank {
       const elapsed =
         ((performance.now() - scheduledAt) / 1000) * playbackRate
       const playbackTime = startAt + elapsed
+      const playbackHorizon =
+        playbackTime + AUDIO_LOOKAHEAD_SECONDS * playbackRate
+      const audioTime = toneNow()
 
       while (
         nextNoteIndex < scheduledNotes.length &&
-        scheduledNotes[nextNoteIndex]!.start <= playbackTime
+        scheduledNotes[nextNoteIndex]!.start <= playbackHorizon
       ) {
         const note = scheduledNotes[nextNoteIndex]!
         const piano = this.pianos.get(note.track)
@@ -158,9 +161,14 @@ export class TrackPianoBank {
           continue
         }
 
+        const delay = Math.max(
+          0,
+          (note.start - playbackTime) / playbackRate,
+        )
+        const attackTime = audioTime + delay
         piano.keyDown({
           midi: note.pitch,
-          time: toneNow(),
+          time: attackTime,
           velocity: Math.min(
             Math.max(note.velocity * 0.86 + 0.07, 0.05),
             0.93,
@@ -171,18 +179,11 @@ export class TrackPianoBank {
           0.08,
           (note.end - Math.max(note.start, startAt)) / playbackRate,
         )
-        const releaseTimer = window.setTimeout(() => {
-          this.releaseTimers.delete(releaseTimer)
-
-          if (this.generation === generation) {
-            piano.keyUp({
-              midi: note.pitch,
-              time: toneNow(),
-              velocity: 0.55,
-            })
-          }
-        }, heldDuration * 1000)
-        this.releaseTimers.add(releaseTimer)
+        piano.keyUp({
+          midi: note.pitch,
+          time: attackTime + heldDuration,
+          velocity: 0.55,
+        })
       }
 
       if (nextNoteIndex >= scheduledNotes.length) {
@@ -195,7 +196,7 @@ export class TrackPianoBank {
         1,
         Math.min(
           16,
-          ((nextStart - playbackTime) / playbackRate) * 1000,
+          ((nextStart - playbackHorizon) / playbackRate) * 1000,
         ),
       )
       this.schedulerTimer = window.setTimeout(tick, delay)
@@ -210,12 +211,13 @@ export class TrackPianoBank {
 
     this.clearSchedulerTimer()
 
-    this.releaseTimers.forEach((timer) => window.clearTimeout(timer))
-    this.releaseTimers.clear()
-
     this.pianos.forEach((piano) => {
       piano.stopAll()
+      piano.dispose()
     })
+    this.pianos.clear()
+    this.loadPromise = null
+    this.key = ''
 
     if (this.output) {
       const time = toneNow()

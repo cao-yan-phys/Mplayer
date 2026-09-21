@@ -66,6 +66,13 @@
   background: #030302;
 }
 
+:root.liquid-score-mode {
+  --bg: #ffffff;
+  --paper: #ffffff;
+  color-scheme: light;
+  background: #ffffff;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -81,7 +88,16 @@ body {
   background: #030302;
 }
 
+:root.liquid-score-mode body,
+:root.liquid-score-mode #root {
+  background: #ffffff;
+}
+
 :root.gold-ink-mode body {
+  overflow: hidden;
+}
+
+:root.liquid-score-mode body {
   overflow: hidden;
 }
 
@@ -128,7 +144,21 @@ label:focus-within {
   background: #030302;
 }
 
+.app-shell.is-liquid-score-mode:fullscreen {
+  padding: 0;
+  background: #ffffff;
+}
+
 .app-shell.is-gold-ink-mode {
+  display: block;
+  width: 100vw;
+  height: 100svh;
+  min-height: 100svh;
+  margin: 0;
+  padding: 0;
+}
+
+.app-shell.is-liquid-score-mode {
   display: block;
   width: 100vw;
   height: 100svh;
@@ -145,8 +175,23 @@ label:focus-within {
   display: none;
 }
 
+.app-shell.is-liquid-score-mode .topbar,
+.app-shell.is-liquid-score-mode .controls-anchor,
+.app-shell.is-liquid-score-mode .error-line,
+.app-shell.is-liquid-score-mode .clef-rail,
+.app-shell.is-liquid-score-mode .keyboard-index {
+  display: none;
+}
+
 .app-shell.is-gold-ink-mode .visual-stage,
 .app-shell.is-gold-ink-mode .canvas-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+}
+
+.app-shell.is-liquid-score-mode .visual-stage,
+.app-shell.is-liquid-score-mode .canvas-frame {
   width: 100%;
   height: 100%;
   min-height: 100%;
@@ -156,6 +201,13 @@ label:focus-within {
   border: 0;
   border-radius: 0;
   background: #030302;
+  box-shadow: none;
+}
+
+.app-shell.is-liquid-score-mode .canvas-frame {
+  border: 0;
+  border-radius: 0;
+  background: #ffffff;
   box-shadow: none;
 }
 
@@ -541,9 +593,18 @@ p {
 }
 
 .practice-sequence__timing-fill {
+  position: absolute;
   height: 100%;
   background: rgba(168, 115, 8, 0.78);
   transition: width 90ms linear;
+}
+
+.practice-sequence__timing-fill--leading {
+  right: 50%;
+}
+
+.practice-sequence__timing-fill--trailing {
+  left: 50%;
 }
 
 @keyframes practice-sequence-in {
@@ -592,6 +653,12 @@ p {
   flex: 1 1 280px;
   min-width: 220px;
   gap: 9px;
+}
+
+.progress-track {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 120px;
 }
 
 .icon-button,
@@ -825,10 +892,40 @@ p {
 }
 
 .progress {
-  flex: 1 1 auto;
+  display: block;
+  width: 100%;
   min-width: 120px;
   margin: 0;
   accent-color: #60776f;
+}
+
+.progress-marker {
+  position: absolute;
+  top: 50%;
+  width: 1px;
+  height: 7px;
+  transform: translate(-50%, -50%);
+  background: rgba(47, 44, 39, 0.56);
+  pointer-events: none;
+}
+
+.progress-marker span {
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  color: rgba(47, 44, 39, 0.72);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.progress-marker--start {
+  transform: translate(0, -50%);
+}
+
+.progress-marker--start span {
+  left: 0;
+  transform: none;
 }
 
 .time-readout {

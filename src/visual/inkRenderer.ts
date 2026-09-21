@@ -17,7 +17,6 @@ interface RenderInkOptions {
   overviewProgress?: number
   visibleTracks: ReadonlySet<number>
   keyboardRange?: PitchRange
-  goldInkMode?: boolean
 }
 
 export interface InkRenderMetrics {
@@ -40,8 +39,6 @@ const withAlpha = (hex: string, alpha: number) => {
   const b = Number.parseInt(value.slice(4, 6), 16)
   return `rgba(${r}, ${g}, ${b}, ${clamp(alpha, 0, 1)})`
 }
-
-const smoothStep = (value: number) => value * value * (3 - 2 * value)
 
 const lerp = (from: number, to: number, progress: number) =>
   from + (to - from) * progress
@@ -297,11 +294,11 @@ const makeTransitionPoints = (
 
   return sampleTimes.map((t) => {
     const local = (t - from.end) / Math.max(to.start - from.end, 0.001)
-    const eased = smoothStep(clamp(local, 0, 1))
+    const progress = clamp(local, 0, 1)
 
     return {
       x: coordinates.timeToX(t),
-      y: y0 + (y1 - y0) * eased,
+      y: y0 + (y1 - y0) * progress,
       time: t,
     }
   })
@@ -342,48 +339,6 @@ const drawInkStroke = (
   ctx.lineWidth = width
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
-  ctx.beginPath()
-  ctx.moveTo(first.x, first.y)
-  points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y))
-  ctx.stroke()
-  ctx.restore()
-}
-
-const drawGoldNoteStroke = (
-  ctx: CanvasRenderingContext2D,
-  points: InkPoint[],
-  width: number,
-  alpha: number,
-  coordinates: ReturnType<typeof createCoordinateSystem>,
-) => {
-  if (points.length < 2) {
-    return
-  }
-
-  const first = points[0]
-  const last = points.at(-1)
-
-  if (!first || !last) {
-    return
-  }
-
-  const midpointTime = (first.time + last.time) / 2
-  const fade = coordinates.alphaForTime(midpointTime)
-  const haloAlpha = (0.12 + alpha * 0.2) * fade
-  const bodyAlpha = (0.26 + alpha * 0.42) * fade
-
-  ctx.save()
-  ctx.globalCompositeOperation = 'source-over'
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
-  ctx.strokeStyle = withAlpha('#e5ad32', haloAlpha)
-  ctx.lineWidth = width + 4
-  ctx.beginPath()
-  ctx.moveTo(first.x, first.y)
-  points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y))
-  ctx.stroke()
-  ctx.strokeStyle = withAlpha('#edc15a', bodyAlpha)
-  ctx.lineWidth = width
   ctx.beginPath()
   ctx.moveTo(first.x, first.y)
   points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y))
@@ -479,7 +434,6 @@ export const renderInkFlow = ({
   overviewProgress = 0,
   visibleTracks,
   keyboardRange,
-  goldInkMode = false,
 }: RenderInkOptions): InkRenderMetrics => {
   const progress = clamp(overviewProgress, 0, 1)
   const coordinates = getInkCoordinates({
@@ -490,9 +444,6 @@ export const renderInkFlow = ({
     currentTime,
     overviewProgress: progress,
     keyboardRange,
-    flowPixelsPerSecond: goldInkMode
-      ? Math.max(width / 13.5, 44)
-      : undefined,
   })
   const overviewInkScale = clamp(width / Math.max(duration * 120, width), 0.3, 1)
   const inkScale = lerp(1, overviewInkScale, easeOutCubic(progress))
@@ -502,41 +453,6 @@ export const renderInkFlow = ({
     currentTime,
     visibleTracks,
   )
-
-  if (goldInkMode) {
-    visibleNotes.forEach((note) => {
-      const start = Math.max(note.start, coordinates.visibleStart)
-      const end = Math.min(note.end, currentTime, coordinates.visibleEnd)
-
-      if (end <= start) {
-        return
-      }
-
-      const y = coordinates.pitchToY(note.pitch, note.role)
-      const points = [
-        {
-          x: coordinates.timeToX(start),
-          y,
-          time: start,
-        },
-        {
-          x: coordinates.timeToX(end),
-          y,
-          time: end,
-        },
-      ]
-
-      drawGoldNoteStroke(
-        ctx,
-        points,
-        inkWidthForNote(note) * inkScale,
-        inkAlphaForNote(note),
-        coordinates,
-      )
-    })
-
-    return { coordinates }
-  }
 
   const allByTrack = new Map<number, MidiNote[]>()
   const visibleByTrack = new Map<number, MidiNote[]>()

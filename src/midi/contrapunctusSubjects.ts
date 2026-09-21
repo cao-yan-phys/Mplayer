@@ -71,6 +71,7 @@ const subjects: SubjectDefinition[] = [
       { track: 2, start: 268.5, noteCount: 41 },
       { track: 0, start: 292.5, noteCount: 41 },
       { track: 1, start: 310.5, noteCount: 41 },
+      { track: 2, start: 332.5, noteCount: 41 },
       { track: 3, start: 358.5, noteCount: 41 },
       { track: 1, start: 464.5, noteCount: 41 },
     ],
