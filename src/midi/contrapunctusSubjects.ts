@@ -56,7 +56,6 @@ const subjects: SubjectDefinition[] = [
       { track: 0, start: 337, noteCount: 7 },
       { track: 1, start: 363, noteCount: 7 },
       { track: 0, start: 365, noteCount: 7 },
-      { track: 0, start: 420.5, noteCount: 7, inverted: true },
       { track: 3, start: 467, noteCount: 7 },
     ],
   },
@@ -92,12 +91,6 @@ const subjects: SubjectDefinition[] = [
       { track: 1, start: 451, noteCount: 10 },
       { track: 2, start: 469, noteCount: 10 },
     ],
-  },
-  {
-    id: '4',
-    label: '4',
-    color: '#12665c',
-    occurrences: [{ track: 2, start: 480, noteCount: 8 }],
   },
 ]
 
