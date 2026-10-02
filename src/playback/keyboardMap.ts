@@ -82,8 +82,11 @@ export const keyboardOctaveStepForCode = (code: string) => {
 const getOctaveShift = (octaveLevel: number) =>
   (clampKeyboardOctaveLevel(octaveLevel) - DEFAULT_KEYBOARD_OCTAVE_LEVEL) * 12
 
-export const keyboardRangeForOctaveLevel = (octaveLevel: number) => {
-  const shift = getOctaveShift(octaveLevel)
+export const keyboardRangeForOctaveLevel = (
+  octaveLevel: number,
+  transposeSemitones = 0,
+) => {
+  const shift = getOctaveShift(octaveLevel) + Math.trunc(transposeSemitones)
 
   return {
     min: Math.max(KEYBOARD_MIN_MIDI, KEYBOARD_BASE_MIN_MIDI + shift),
@@ -91,14 +94,19 @@ export const keyboardRangeForOctaveLevel = (octaveLevel: number) => {
   }
 }
 
-export const keyboardPitchForCode = (code: string, octaveLevel = 3) => {
+export const keyboardPitchForCode = (
+  code: string,
+  octaveLevel = 3,
+  transposeSemitones = 0,
+) => {
   const pitch = keyboardSemitones.get(code)
 
   if (pitch === undefined) {
     return undefined
   }
 
-  const shiftedPitch = pitch + getOctaveShift(octaveLevel)
+  const shiftedPitch =
+    pitch + getOctaveShift(octaveLevel) + Math.trunc(transposeSemitones)
 
   return shiftedPitch >= KEYBOARD_MIN_MIDI && shiftedPitch <= KEYBOARD_MAX_MIDI
     ? shiftedPitch
@@ -123,10 +131,20 @@ const pitchClassNames = [
 export const midiPitchName = (pitch: number) =>
   `${pitchClassNames[pitch % 12]}${Math.floor(pitch / 12) - 1}`
 
-export const keyboardBindingsForOctaveLevel = (octaveLevel: number) =>
+export const keyboardBindingsForOctaveLevel = (
+  octaveLevel: number,
+  transposeSemitones = 0,
+) =>
   keyboardSemitoneEntries.map((binding) => {
-    const shiftedPitch = binding.basePitch + getOctaveShift(octaveLevel)
-    const pitch = keyboardPitchForCode(binding.code, octaveLevel)
+    const shiftedPitch =
+      binding.basePitch +
+      getOctaveShift(octaveLevel) +
+      Math.trunc(transposeSemitones)
+    const pitch = keyboardPitchForCode(
+      binding.code,
+      octaveLevel,
+      transposeSemitones,
+    )
 
     return {
       ...binding,

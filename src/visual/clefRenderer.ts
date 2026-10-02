@@ -16,6 +16,13 @@ interface ClefDefinition {
   staffPitches: readonly number[]
 }
 
+export interface ClefHitArea {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
 const trebleClef: ClefDefinition = {
   glyph: '\uE050',
   anchorPitch: 67,
@@ -75,12 +82,70 @@ const drawClef = (
   ctx.font = `${Math.min(Math.max(staffSpace * 4, 48), 190)}px Bravura`
   const leftEdge = Math.min(Math.max(width * 0.14, 10), 18)
   const metrics = ctx.measureText(definition.glyph)
+
   ctx.fillText(
     definition.glyph,
     leftEdge + metrics.actualBoundingBoxLeft,
     coordinates.pitchToY(definition.anchorPitch),
   )
 }
+
+const getClefHitArea = (
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  inkHeight: number,
+  coordinates: CoordinateSystem,
+  definition: ClefDefinition,
+): ClefHitArea | null => {
+  if (!isVisibleStaff(definition.staffPitches, coordinates, inkHeight)) {
+    return null
+  }
+
+  const staffSpace = averageStaffSpace(definition.staffPitches, coordinates)
+
+  if (staffSpace < 7) {
+    return null
+  }
+
+  const fontSize = Math.min(Math.max(staffSpace * 4, 48), 190)
+  const leftEdge = Math.min(Math.max(width * 0.14, 10), 18)
+
+  ctx.save()
+  ctx.font = `${fontSize}px Bravura`
+  const metrics = ctx.measureText(definition.glyph)
+  ctx.restore()
+
+  const baseline = coordinates.pitchToY(definition.anchorPitch)
+  const left = Math.max(0, leftEdge)
+  const top = Math.max(0, baseline - metrics.actualBoundingBoxAscent)
+
+  return {
+    left,
+    top,
+    width: Math.min(
+      width - left,
+      metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight,
+    ),
+    height: Math.min(
+      inkHeight - top,
+      metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent,
+    ),
+  }
+}
+
+export const getTrebleClefHitArea = (
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  inkHeight: number,
+  coordinates: CoordinateSystem,
+) => getClefHitArea(ctx, width, inkHeight, coordinates, trebleClef)
+
+export const getBassClefHitArea = (
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  inkHeight: number,
+  coordinates: CoordinateSystem,
+) => getClefHitArea(ctx, width, inkHeight, coordinates, bassClef)
 
 export const renderClefRail = ({
   ctx,

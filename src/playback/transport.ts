@@ -12,18 +12,13 @@ import {
   KEYBOARD_MIN_MIDI,
   keyboardRangeForOctaveLevel,
 } from './keyboardMap'
-import {
-  getOcarinaGainProfile,
-  getSmallPianoVoiceProfile,
-} from './soundProfiles'
+import { ExternalMidiOutput, type MidiOutputPort } from './midiOutput'
 import { TrackPianoBank } from './trackPianoBank'
 
 type TransportState = 'stopped' | 'paused' | 'playing'
 
 export type SoundPreset =
   | 'grandPiano'
-  | 'harmonicPiano'
-  | 'ocarina'
   | 'musicBox'
 
 export interface TrackSoundOverride {
@@ -52,24 +47,14 @@ interface KeyboardPreviewOptions {
   velocity?: number
   useFullPiano?: boolean
   musicBoxGain?: number
+  transposeSemitones?: number
 }
 
 const LOOKAHEAD_SECONDS = 1.35
 const SCHEDULER_MS = 55
 const SOUND_SWITCH_SETTLE_SECONDS = 0.05
-const OCARINA_MASTER_GAIN = 0.38
-const OCARINA_MIN_SAMPLE_MIDI = 24
-const OCARINA_MAX_SAMPLE_MIDI = 96
-const OCARINA_SAMPLE_INTERVAL = 3
-const OCARINA_CLEAR_LOW_SAMPLE_THRESHOLD = 52
-const OCARINA_CLEAR_LOW_SAMPLE_OFFSET = 12
-const OCARINA_TARGET_RMS = 0.055
-const OCARINA_MAX_SAMPLE_NORMALIZATION = 6
-const OCARINA_PIANO_THRESHOLD = 72
-const SCORE_PIANO_MASTER_GAIN = 1.1
 const MUSIC_BOX_MASTER_GAIN = 2
 const NON_GRAND_PRESET_GAIN = 4
-const SMALL_PIANO_PRESET_GAIN = 1.25
 const GRAND_PIANO_LOOKAHEAD_SECONDS = 0.72
 const GRAND_PIANO_FILTER_FREQUENCY = 6800
 const KEYBOARD_NOTE_VELOCITY = 0.76
@@ -85,33 +70,11 @@ const PIANO_BASE_VOLUME = {
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max)
 
-const midiToFrequency = (pitch: number) =>
-  440 * 2 ** ((pitch - 69) / 12)
-
 const volumeToDecibelOffset = (volume: number) =>
   volume <= 0.0001 ? -80 : 20 * Math.log10(volume)
 
-const getBufferRms = (buffer: AudioBuffer) => {
-  let energy = 0
-  let sampleCount = 0
-
-  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
-    const samples = buffer.getChannelData(channel)
-
-    for (let index = 0; index < samples.length; index += 1) {
-      energy += samples[index] ** 2
-    }
-
-    sampleCount += samples.length
-  }
-
-  return Math.sqrt(energy / Math.max(sampleCount, 1))
-}
-
 const MUSIC_BOX_BASE_URL =
   'https://gleitz.github.io/midi-js-soundfonts/MusyngKite/music_box-mp3/'
-const OCARINA_BASE_URL =
-  'https://gleitz.github.io/midi-js-soundfonts/MusyngKite/ocarina-mp3/'
 const MUSIC_BOX_MIN_MIDI = 21
 const MUSIC_BOX_MAX_MIDI = 108
 const MUSIC_BOX_SAMPLE_NAMES = [
@@ -152,7 +115,7 @@ export const normalizePlaybackRate = (rate: number): PlaybackRate => {
 }
 
 export class MidiTransport {
-  readonly revision = 14
+  readonly revision = 15
 
   private context: AudioContext | null = null
 
@@ -198,14 +161,6 @@ export class MidiTransport {
 
   private failedMusicBoxSamples = new Set<string>()
 
-  private ocarinaBuffers = new Map<string, AudioBuffer>()
-
-  private ocarinaSampleNormalizations = new Map<string, number>()
-
-  private ocarinaLoadPromises = new Map<string, Promise<AudioBuffer | null>>()
-
-  private failedOcarinaSamples = new Set<string>()
-
   private duration = 0
 
   private state: TransportState = 'stopped'
@@ -233,6 +188,8 @@ export class MidiTransport {
   private keyboardHeldPitches = new Set<number>()
 
   private keyboardVoices = new Map<number, KeyboardVoice>()
+
+  private externalMidiOutput = new ExternalMidiOutput()
 
   private resumeAfterSeek = false
 
@@ -262,6 +219,14 @@ export class MidiTransport {
     this.visibleTracks = new Set(visibleTracks)
   }
 
+  getMidiOutputPorts(): Promise<MidiOutputPort[]> {
+    return this.externalMidiOutput.listPorts()
+  }
+
+  selectMidiOutput(id: string | null): Promise<MidiOutputPort[]> {
+    return this.externalMidiOutput.selectPort(id)
+  }
+
   setSoundPreset(soundPreset: SoundPreset) {
     if (soundPreset === this.soundPreset) {
       return
@@ -269,6 +234,7 @@ export class MidiTransport {
 
     const wasPlaying = this.state === 'playing'
     const currentTime = this.getCurrentTime()
+    const externalMidiSelected = this.externalMidiOutput.hasSelectedPort()
 
     this.releaseKeyboardNotes()
 
@@ -278,14 +244,42 @@ export class MidiTransport {
     }
 
     this.soundPreset = soundPreset
-    if (wasPlaying && soundPreset === 'grandPiano') {
+    if (
+      wasPlaying &&
+      soundPreset === 'grandPiano' &&
+      !externalMidiSelected
+    ) {
       this.openPianoOutput()
     }
     this.applyMasterGain(
       wasPlaying ? SOUND_SWITCH_SETTLE_SECONDS : 0,
     )
 
-    if (wasPlaying && this.context) {
+    if (
+      wasPlaying &&
+      soundPreset === 'musicBox' &&
+      !externalMidiSelected
+    ) {
+      void this.ensureMusicBoxLoaded(this.notesForSoundPreset('musicBox')).then(() => {
+        if (
+          this.state !== 'playing' ||
+          this.soundPreset !== 'musicBox' ||
+          !this.context
+        ) {
+          return
+        }
+
+        const resumedTime = this.getCurrentTime()
+        this.position = resumedTime
+        this.basePosition = resumedTime
+        this.startedAt = this.context.currentTime
+        this.nextNoteIndex = this.findNextNoteIndex(resumedTime)
+        this.tickScheduler()
+        this.schedulerId = window.setInterval(() => {
+          this.tickScheduler()
+        }, SCHEDULER_MS)
+      })
+    } else if (wasPlaying && this.context) {
       this.position = currentTime
       this.basePosition = currentTime
       this.startedAt = this.context.currentTime
@@ -296,7 +290,9 @@ export class MidiTransport {
       }, SCHEDULER_MS)
     }
 
-    this.preloadCurrentSound()
+    if (!externalMidiSelected) {
+      this.preloadCurrentSound()
+    }
   }
 
   setTrackSoundOverrides(
@@ -306,6 +302,10 @@ export class MidiTransport {
   }
 
   preloadCurrentSound() {
+    if (this.externalMidiOutput.hasSelectedPort()) {
+      return
+    }
+
     if (this.hasSoundPreset('grandPiano')) {
       void this.ensurePianoLoaded()
     }
@@ -314,14 +314,15 @@ export class MidiTransport {
       void this.ensureMusicBoxLoaded(this.notesForSoundPreset('musicBox'))
     }
 
-    if (this.hasSoundPreset('ocarina')) {
-      void this.ensureOcarinaLoaded()
-    }
   }
 
   async preparePractice() {
     const context = this.ensureContext()
     await context.resume()
+
+    if (this.externalMidiOutput.hasSelectedPort()) {
+      return
+    }
 
     if (this.hasSoundPreset('grandPiano')) {
       await startTone()
@@ -332,9 +333,6 @@ export class MidiTransport {
       await this.ensureMusicBoxLoaded(this.notesForSoundPreset('musicBox'))
     }
 
-    if (this.hasSoundPreset('ocarina')) {
-      await this.ensureOcarinaLoaded()
-    }
   }
 
   async playPracticeNotes(
@@ -365,6 +363,15 @@ export class MidiTransport {
   }
 
   async prepareTrackPianoBank(notes: readonly MidiNote[]) {
+    if (this.externalMidiOutput.hasSelectedPort()) {
+      return
+    }
+
+    if (this.soundPreset === 'musicBox') {
+      await this.ensureMusicBoxLoaded(notes)
+      return
+    }
+
     const context = this.ensureContext()
     await context.resume()
     await startTone()
@@ -382,6 +389,45 @@ export class MidiTransport {
     startAt: number,
     endAt: number,
   ) {
+    const externalMidiSelected = this.externalMidiOutput.hasSelectedPort()
+
+    notes.forEach((note) => {
+      if (note.start >= startAt && note.start < endAt) {
+        this.externalMidiOutput.scheduleNote(
+          note,
+          startAt,
+          this.playbackRate,
+        )
+      }
+    })
+
+    if (externalMidiSelected) {
+      return
+    }
+
+    if (this.soundPreset === 'musicBox') {
+      const context = this.context
+      const master = this.master
+
+      if (!context || !master) {
+        return
+      }
+
+      notes.forEach((note) => {
+        if (note.start >= startAt && note.start < endAt) {
+          this.scheduleMusicBoxNote(
+            note,
+            startAt,
+            context.currentTime + 0.025,
+            context,
+            master,
+            this.getNoteSoundGain(note, 'musicBox'),
+          )
+        }
+      })
+      return
+    }
+
     this.openPianoOutput()
     this.trackPianoBank?.schedule(
       notes,
@@ -461,6 +507,7 @@ export class MidiTransport {
       this.pianoOutputGate.gain.cancelScheduledValues(time)
       this.pianoOutputGate.gain.setTargetAtTime(this.pieceGain, time, 0.015)
     }
+
   }
 
   getCurrentTime() {
@@ -479,24 +526,21 @@ export class MidiTransport {
   async play(startAt = this.position) {
     const context = this.ensureContext()
     await context.resume()
+    const externalMidiSelected = this.externalMidiOutput.hasSelectedPort()
 
-    if (this.hasSoundPreset('grandPiano')) {
+    if (!externalMidiSelected && this.hasSoundPreset('grandPiano')) {
       await startTone()
       await this.ensurePianoLoaded()
     }
 
-    if (this.hasSoundPreset('musicBox')) {
+    if (!externalMidiSelected && this.hasSoundPreset('musicBox')) {
       await this.ensureMusicBoxLoaded(this.notesForSoundPreset('musicBox'))
-    }
-
-    if (this.hasSoundPreset('ocarina')) {
-      await this.ensureOcarinaLoaded()
     }
 
     this.clearScheduler()
     this.releaseKeyboardNotes()
     this.stopActiveVoices()
-    if (this.hasSoundPreset('grandPiano')) {
+    if (!externalMidiSelected && this.hasSoundPreset('grandPiano')) {
       this.openPianoOutput()
     }
     this.state = 'playing'
@@ -574,6 +618,14 @@ export class MidiTransport {
     }
 
     this.keyboardHeldPitches.add(safePitch)
+    this.externalMidiOutput.noteOn(
+      safePitch,
+      options.velocity ?? KEYBOARD_NOTE_VELOCITY,
+    )
+
+    if (this.externalMidiOutput.hasSelectedPort()) {
+      return
+    }
 
     try {
       const context = this.ensureContext()
@@ -633,7 +685,10 @@ export class MidiTransport {
         options.useFullPiano && this.piano?.loaded
           ? this.piano
           : await this.getKeyboardPiano(
-              this.getKeyboardPianoRange(octaveLevel),
+              this.getKeyboardPianoRange(
+                octaveLevel,
+                options.transposeSemitones,
+              ),
             )
 
       if (!piano || !this.isKeyboardPitchHeld(safePitch)) {
@@ -657,6 +712,7 @@ export class MidiTransport {
       clamp(pitch, KEYBOARD_MIN_MIDI, KEYBOARD_MAX_MIDI),
     )
     this.keyboardHeldPitches.delete(safePitch)
+    this.externalMidiOutput.noteOff(safePitch)
 
     const voice = this.keyboardVoices.get(safePitch)
 
@@ -688,16 +744,19 @@ export class MidiTransport {
     this.keyboardHeldPitches.clear()
   }
 
-  prepareKeyboardOctave(octaveLevel: number) {
+  prepareKeyboardOctave(octaveLevel: number, transposeSemitones = 0) {
     return this.ensureKeyboardPianoLoaded(
-      this.getKeyboardPianoRange(octaveLevel),
+      this.getKeyboardPianoRange(octaveLevel, transposeSemitones),
     )
   }
 
-  async prepareKeyboardOctaves(octaveLevels: readonly number[]) {
+  async prepareKeyboardOctaves(
+    octaveLevels: readonly number[],
+    transposeSemitones = 0,
+  ) {
     await Promise.all(
       [...new Set(octaveLevels)].map((octaveLevel) =>
-        this.prepareKeyboardOctave(octaveLevel),
+        this.prepareKeyboardOctave(octaveLevel, transposeSemitones),
       ),
     )
   }
@@ -767,14 +826,24 @@ export class MidiTransport {
     playbackTime: number,
     audioTime: number,
   ) {
+    this.externalMidiOutput.scheduleNote(
+      note,
+      playbackTime,
+      this.playbackRate,
+    )
+
+    if (this.externalMidiOutput.hasSelectedPort()) {
+      return
+    }
+
+    const soundPreset = this.getSoundPreset(note)
+
     const context = this.context
     const master = this.master
 
     if (!context || !master) {
       return
     }
-
-    const soundPreset = this.getSoundPreset(note)
 
     if (soundPreset === 'musicBox') {
       this.scheduleMusicBoxNote(
@@ -790,50 +859,13 @@ export class MidiTransport {
       return
     }
 
-    if (soundPreset === 'ocarina') {
-      if (note.pitch < OCARINA_PIANO_THRESHOLD) {
-        this.scheduleHarmonicPianoNote(
-          note,
-          playbackTime,
-          audioTime,
-          context,
-          master,
-        )
-        return
-      }
-
-      this.scheduleOcarinaNote(note, playbackTime, audioTime, context, master)
-      return
-    }
-
     if (soundPreset === 'grandPiano') {
       const piano = this.piano?.loaded ? this.piano : null
 
       if (piano) {
         this.scheduleGrandPianoNote(piano, note, playbackTime)
-      } else {
-        this.scheduleHarmonicPianoNote(
-          note,
-          playbackTime,
-          audioTime,
-          context,
-          master,
-        )
       }
-      return
     }
-
-    if (soundPreset === 'harmonicPiano') {
-      this.scheduleHarmonicPianoNote(
-        note,
-        playbackTime,
-        audioTime,
-        context,
-        master,
-      )
-      return
-    }
-
   }
 
   private getPianoRange() {
@@ -966,8 +998,14 @@ export class MidiTransport {
     }
   }
 
-  private getKeyboardPianoRange(octaveLevel: number) {
-    const range = keyboardRangeForOctaveLevel(octaveLevel)
+  private getKeyboardPianoRange(
+    octaveLevel: number,
+    transposeSemitones = 0,
+  ) {
+    const range = keyboardRangeForOctaveLevel(
+      octaveLevel,
+      transposeSemitones,
+    )
     const minNote = Math.max(21, range.min - 3)
     const maxNote = Math.min(108, range.max + 3)
 
@@ -1115,6 +1153,7 @@ export class MidiTransport {
     }
 
     this.releaseKeyboardNotes()
+    this.externalMidiOutput.stopAll()
     if (!preserveMainPiano) {
       this.discardPianoForSeek()
     }
@@ -1216,22 +1255,9 @@ export class MidiTransport {
   }
 
   private getSoundPresetBaseGain(soundPreset: SoundPreset) {
-    const presetGain =
-      soundPreset === 'musicBox'
-        ? MUSIC_BOX_MASTER_GAIN
-        : soundPreset === 'ocarina'
-          ? OCARINA_MASTER_GAIN
-        : soundPreset === 'harmonicPiano'
-          ? SCORE_PIANO_MASTER_GAIN / DEFAULT_VOLUME
-          : 1
-    const presetMultiplier =
-      soundPreset === 'grandPiano'
-        ? 1
-        : soundPreset === 'harmonicPiano'
-          ? SMALL_PIANO_PRESET_GAIN
-        : NON_GRAND_PRESET_GAIN
-
-    return presetGain * presetMultiplier
+    return soundPreset === 'musicBox'
+      ? MUSIC_BOX_MASTER_GAIN * NON_GRAND_PRESET_GAIN
+      : 1
   }
 
   private getMasterGain() {
@@ -1341,7 +1367,7 @@ export class MidiTransport {
     return promise
   }
 
-  private async ensureMusicBoxLoaded(notes = this.notes) {
+  private async ensureMusicBoxLoaded(notes: readonly MidiNote[] = this.notes) {
     const context = this.ensureContext()
     const sampleNames = [
       ...new Set(notes.map((note) => this.getMusicBoxSample(note.pitch).name)),
@@ -1352,88 +1378,6 @@ export class MidiTransport {
         this.loadMusicBoxSample(sampleName, context),
       ),
     )
-  }
-
-  private async loadOcarinaSample(
-    sampleName: string,
-    context = this.ensureContext(),
-  ) {
-    const loaded = this.ocarinaBuffers.get(sampleName)
-
-    if (loaded) {
-      return loaded
-    }
-
-    const pending = this.ocarinaLoadPromises.get(sampleName)
-
-    if (pending) {
-      return pending
-    }
-
-    const promise = fetch(`${OCARINA_BASE_URL}${sampleName}.mp3`)
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`Could not load ocarina sample ${sampleName}.`)
-        }
-
-        return response.arrayBuffer()
-      })
-      .then((buffer) => context.decodeAudioData(buffer))
-      .then((buffer) => {
-        this.ocarinaBuffers.set(sampleName, buffer)
-        this.ocarinaSampleNormalizations.set(
-          sampleName,
-          clamp(
-            OCARINA_TARGET_RMS / Math.max(getBufferRms(buffer), 0.0001),
-            1,
-            OCARINA_MAX_SAMPLE_NORMALIZATION,
-          ),
-        )
-        this.failedOcarinaSamples.delete(sampleName)
-        return buffer
-      })
-      .catch(() => {
-        this.failedOcarinaSamples.add(sampleName)
-        return null
-      })
-      .finally(() => {
-        this.ocarinaLoadPromises.delete(sampleName)
-      })
-
-    this.ocarinaLoadPromises.set(sampleName, promise)
-    return promise
-  }
-
-  private async ensureOcarinaLoaded() {
-    const context = this.ensureContext()
-    const sampleNames = [
-      ...new Set(this.notes.map((note) => this.getOcarinaSample(note.pitch).name)),
-    ]
-
-    await Promise.allSettled(
-      sampleNames.map((sampleName) =>
-        this.loadOcarinaSample(sampleName, context),
-      ),
-    )
-  }
-
-  private getOcarinaSample(pitch: number) {
-    const sourcePitch =
-      pitch < OCARINA_CLEAR_LOW_SAMPLE_THRESHOLD
-        ? pitch + OCARINA_CLEAR_LOW_SAMPLE_OFFSET
-        : pitch
-    const samplePitch =
-      Math.round(
-        clamp(sourcePitch, OCARINA_MIN_SAMPLE_MIDI, OCARINA_MAX_SAMPLE_MIDI) /
-          OCARINA_SAMPLE_INTERVAL,
-      ) * OCARINA_SAMPLE_INTERVAL
-    const noteName = MUSIC_BOX_SAMPLE_NAMES[samplePitch % 12]
-    const octave = Math.floor(samplePitch / 12) - 1
-
-    return {
-      name: `${noteName}${octave}`,
-      playbackRatio: 2 ** ((pitch - samplePitch) / 12),
-    }
   }
 
   private scheduleGrandPianoNote(
@@ -1459,141 +1403,6 @@ export class MidiTransport {
       time: releaseAt,
       velocity: 0.55,
     })
-  }
-
-  private scheduleOcarinaNote(
-    note: MidiNote,
-    playbackTime: number,
-    audioTime: number,
-    context: AudioContext,
-    master: GainNode,
-  ): Voice | null {
-    const sample = this.getOcarinaSample(note.pitch)
-    const buffer = this.ocarinaBuffers.get(sample.name)
-
-    if (!buffer) {
-      if (!this.failedOcarinaSamples.has(sample.name)) {
-        void this.loadOcarinaSample(sample.name, context)
-      }
-      return null
-    }
-
-    const startAt =
-      audioTime + Math.max(0, note.start - playbackTime) / this.playbackRate
-    const naturalDuration = buffer.duration / sample.playbackRatio
-    const scaledDuration = note.duration / this.playbackRate
-    const source = context.createBufferSource()
-    const gain = context.createGain()
-    const { level, lowRegisterGain } = getOcarinaGainProfile(
-      note.pitch,
-      note.velocity,
-      this.ocarinaSampleNormalizations.get(sample.name) ?? 1,
-    )
-    const hasLowPresence = lowRegisterGain > 1
-    const stopAt =
-      startAt +
-      Math.min(
-        naturalDuration,
-        Math.max(
-          hasLowPresence ? 0.5 : 0.28,
-          scaledDuration + (hasLowPresence ? 0.38 : 0.24),
-        ),
-      )
-    const attack = Math.min(0.018, Math.max(0.006, scaledDuration * 0.12))
-    const release = hasLowPresence
-      ? Math.min(0.2, Math.max(0.08, scaledDuration * 0.3))
-      : Math.min(0.11, Math.max(0.035, scaledDuration * 0.18))
-
-    source.buffer = buffer
-    source.playbackRate.setValueAtTime(sample.playbackRatio, startAt)
-    gain.gain.setValueAtTime(0.0001, startAt)
-    gain.gain.linearRampToValueAtTime(level, startAt + attack)
-    gain.gain.setValueAtTime(level, Math.max(startAt + attack, stopAt - release))
-    gain.gain.exponentialRampToValueAtTime(0.0001, stopAt)
-
-    source.connect(gain)
-    gain.connect(master)
-    source.start(startAt)
-    source.stop(stopAt + 0.03)
-
-    const voice = { sources: [source], gains: [gain] }
-    this.activeVoices.push(voice)
-    source.onended = () => {
-      this.cleanupVoice(voice)
-    }
-    return voice
-  }
-
-  private scheduleHarmonicPianoNote(
-    note: MidiNote,
-    playbackTime: number,
-    audioTime: number,
-    context: AudioContext,
-    master: GainNode,
-  ): Voice | null {
-    const startAt =
-      audioTime + Math.max(0, note.start - playbackTime) / this.playbackRate
-    const audibleDuration = Math.max(
-      0.06,
-      (note.end - Math.max(note.start, playbackTime)) / this.playbackRate,
-    )
-    const profile = getSmallPianoVoiceProfile(
-      note.pitch,
-      note.velocity,
-      audibleDuration,
-    )
-    const frequency = midiToFrequency(note.pitch)
-    const sources: OscillatorNode[] = []
-    const output = context.createGain()
-    const filter = context.createBiquadFilter()
-    const gains: GainNode[] = [output]
-    const partials = profile.partials.filter(
-      (partial) => frequency * partial.ratio < context.sampleRate * 0.45,
-    )
-
-    if (partials.length === 0) {
-      return null
-    }
-
-    output.gain.setValueAtTime(0.0001, startAt)
-    output.gain.linearRampToValueAtTime(profile.noteLevel, startAt + 0.014)
-    filter.type = 'lowpass'
-    filter.frequency.setValueAtTime(profile.filterFrequency, startAt)
-    filter.Q.setValueAtTime(0.35, startAt)
-    output.connect(filter)
-    filter.connect(master)
-
-    partials.forEach((partial) => {
-      const oscillator = context.createOscillator()
-      const gain = context.createGain()
-      const partialDecay = profile.decay * partial.decay
-      const stopAt = startAt + partialDecay + 0.05
-
-      oscillator.type = 'sine'
-      oscillator.frequency.value = frequency * partial.ratio
-      oscillator.detune.value = 0
-      gain.gain.setValueAtTime(0, startAt)
-      gain.gain.linearRampToValueAtTime(partial.level, startAt + 0.014)
-      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + partialDecay)
-      gain.gain.setValueAtTime(0, stopAt)
-      oscillator.connect(gain)
-      gain.connect(output)
-      oscillator.start(startAt)
-      oscillator.stop(stopAt)
-      sources.push(oscillator)
-      gains.push(gain)
-    })
-
-    const voice = {
-      sources,
-      gains,
-    }
-    this.activeVoices.push(voice)
-    sources[0]?.addEventListener('ended', () => {
-      filter.disconnect()
-      this.cleanupVoice(voice)
-    })
-    return voice
   }
 
   private scheduleMusicBoxNote(
@@ -1657,89 +1466,7 @@ export class MidiTransport {
       }
     }
 
-    const startAt = this.getWebAudioScheduledTime(
-      audioTime,
-      note.start,
-      playbackTime,
-      naturalDurationOnly,
-    )
-    const frequency = midiToFrequency(note.pitch)
-    const scaledDuration = note.duration / this.playbackRate
-    const ringDuration = naturalDurationOnly
-      ? Math.max(4.8, scaledDuration + 2.4)
-      : Math.min(3.2, Math.max(0.85, scaledDuration * 1.25 + 0.7))
-    const stopAt = startAt + ringDuration
-    const velocityLevel = 0.35 + note.velocity * 0.65
-    const roleLevel = note.role === 'bass' ? 0.11 : note.role === 'melody' ? 0.13 : 0.085
-    const baseLevel = roleLevel * velocityLevel * gainMultiplier
-    const output = context.createGain()
-    const filter = context.createBiquadFilter()
-    const partials = [
-      { ratio: 1, level: 1, decay: 1 },
-      { ratio: 2.01, level: 0.34, decay: 0.62 },
-      { ratio: 3.02, level: 0.16, decay: 0.42 },
-      { ratio: 4.18, level: 0.09, decay: 0.28 },
-    ]
-    const oscillators: OscillatorNode[] = []
-    const gains: GainNode[] = [output]
-
-    filter.type = 'highshelf'
-    filter.frequency.setValueAtTime(1800, startAt)
-    filter.gain.setValueAtTime(5, startAt)
-    output.gain.setValueAtTime(0.0001, startAt)
-    output.gain.linearRampToValueAtTime(baseLevel, startAt + 0.012)
-    output.gain.exponentialRampToValueAtTime(baseLevel * 0.34, startAt + 0.22)
-    output.gain.exponentialRampToValueAtTime(0.0001, stopAt)
-    output.connect(filter)
-    filter.connect(master)
-
-    partials.forEach((partial, index) => {
-      const oscillator = context.createOscillator()
-      const partialGain = context.createGain()
-      const detune = index === 0 ? 0 : (index % 2 === 0 ? -4 : 5)
-
-      oscillator.type = index === 0 ? 'triangle' : 'sine'
-      oscillator.frequency.setValueAtTime(frequency * partial.ratio, startAt)
-      oscillator.detune.setValueAtTime(detune, startAt)
-      partialGain.gain.setValueAtTime(0.0001, startAt)
-      partialGain.gain.linearRampToValueAtTime(partial.level, startAt + 0.006)
-      partialGain.gain.exponentialRampToValueAtTime(
-        Math.max(0.0001, partial.level * 0.18),
-        startAt + 0.16 * partial.decay,
-      )
-      partialGain.gain.exponentialRampToValueAtTime(0.0001, stopAt)
-
-      oscillator.connect(partialGain)
-      partialGain.connect(output)
-      oscillator.start(startAt)
-      oscillator.stop(stopAt + 0.03)
-      oscillators.push(oscillator)
-      gains.push(partialGain)
-    })
-
-    const click = context.createOscillator()
-    const clickGain = context.createGain()
-
-    click.type = 'square'
-    click.frequency.setValueAtTime(frequency * 9.5, startAt)
-    clickGain.gain.setValueAtTime(0.0001, startAt)
-    clickGain.gain.linearRampToValueAtTime(baseLevel * 0.16, startAt + 0.003)
-    clickGain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.045)
-    click.connect(clickGain)
-    clickGain.connect(output)
-    click.start(startAt)
-    click.stop(startAt + 0.055)
-    oscillators.push(click)
-    gains.push(clickGain)
-
-    const voice = { sources: oscillators, gains }
-    this.activeVoices.push(voice)
-
-    oscillators[0].onended = () => {
-      filter.disconnect()
-      this.cleanupVoice(voice)
-    }
-    return voice
+    return null
   }
 
   private isKeyboardPitchHeld(pitch: number) {
@@ -1805,7 +1532,7 @@ export class MidiTransport {
     const contextTime = this.context?.currentTime ?? 0
 
     this.releaseKeyboardNotes()
-
+    this.externalMidiOutput.stopAll()
     this.closePianoOutput()
 
     this.piano?.stopAll()

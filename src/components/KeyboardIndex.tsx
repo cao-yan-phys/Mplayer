@@ -7,6 +7,7 @@ import {
 
 interface KeyboardIndexProps {
   octaveLevel: number
+  transposeSemitones: number
   pressedCodes: ReadonlySet<string>
 }
 
@@ -32,16 +33,20 @@ const VIOLIN_OPEN_STRING_PITCHES = new Set([55, 62, 69, 76])
 
 export function KeyboardIndex({
   octaveLevel,
+  transposeSemitones,
   pressedCodes,
 }: KeyboardIndexProps) {
   const columns = useMemo(() => {
-    const bindings = keyboardBindingsForOctaveLevel(octaveLevel)
+    const bindings = keyboardBindingsForOctaveLevel(
+      octaveLevel,
+      transposeSemitones,
+    )
 
     return [
       bindings.filter((binding) => LOW_REGISTER_CODES.has(binding.code)),
       bindings.filter((binding) => !LOW_REGISTER_CODES.has(binding.code)),
     ]
-  }, [octaveLevel])
+  }, [octaveLevel, transposeSemitones])
 
   return (
     <aside className="keyboard-index" aria-label="Keyboard note map">

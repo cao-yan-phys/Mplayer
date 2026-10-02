@@ -27,6 +27,7 @@ import type { MidiNote, ParsedMidi } from './midi/noteTypes'
 import { reverseMidi } from './midi/reverseMidi'
 import { findSymmetryGroups } from './midi/symmetryAnalysis'
 import { clampTranspose, transposeMidi } from './midi/transposeMidi'
+import type { MidiOutputPort } from './playback/midiOutput'
 import {
   DEFAULT_VOLUME,
   normalizePlaybackRate,
@@ -62,6 +63,7 @@ const CONTRAPUNCTUS_SUBJECT_ENTRY_MARKERS = [
 ]
 
 type SourceKind = 'midi' | 'csv'
+type MidiOutputState = 'idle' | 'loading' | 'ready' | 'unavailable'
 
 type PracticeStatus =
   | 'preparing'
@@ -271,6 +273,10 @@ function App() {
   const [playbackRate, setPlaybackRate] = useState<PlaybackRate>(1)
   const [volume, setVolume] = useState(DEFAULT_VOLUME)
   const [transposeSemitones, setTransposeSemitones] = useState(0)
+  const [midiOutputPorts, setMidiOutputPorts] = useState<MidiOutputPort[]>([])
+  const [midiOutputId, setMidiOutputId] = useState<string | null>(null)
+  const [midiOutputState, setMidiOutputState] =
+    useState<MidiOutputState>('idle')
   const [reversePlayback, setReversePlayback] = useState(false)
   const [motifTraceEnabled, setMotifTraceEnabled] = useState(false)
   const [axisSymmetryEnabled, setAxisSymmetryEnabled] = useState(false)
@@ -505,7 +511,7 @@ function App() {
         | (MidiTransport & { setTrackSoundOverrides?: unknown })
         | null
     )?.setTrackSoundOverrides === 'function' &&
-    transportRef.current?.revision === 14
+    transportRef.current?.revision === 15
 
   if (!transportHasTrackSoundOverrides) {
     const transport = new MidiTransport((endedAt) => {
@@ -725,6 +731,55 @@ function App() {
   useEffect(() => {
     transportRef.current?.setVolume(volume)
   }, [volume])
+
+  const requestMidiOutputPorts = useCallback(() => {
+    const transport = transportRef.current
+
+    if (!transport) {
+      setMidiOutputState('unavailable')
+      return
+    }
+
+    setMidiOutputState('loading')
+    void transport
+      .getMidiOutputPorts()
+      .then((ports) => {
+        setMidiOutputPorts(ports)
+        setMidiOutputState(ports.length > 0 ? 'ready' : 'unavailable')
+
+        if (midiOutputId && !ports.some((port) => port.id === midiOutputId)) {
+          setMidiOutputId(null)
+        }
+      })
+      .catch(() => {
+        setMidiOutputPorts([])
+        setMidiOutputId(null)
+        setMidiOutputState('unavailable')
+      })
+  }, [midiOutputId])
+
+  const handleMidiOutputChange = useCallback((id: string | null) => {
+    const transport = transportRef.current
+
+    if (!transport) {
+      setMidiOutputState('unavailable')
+      return
+    }
+
+    setMidiOutputState('loading')
+    void transport
+      .selectMidiOutput(id)
+      .then((ports) => {
+        setMidiOutputPorts(ports)
+        setMidiOutputId(id)
+        setMidiOutputState(ports.length > 0 ? 'ready' : 'unavailable')
+      })
+      .catch(() => {
+        setMidiOutputPorts([])
+        setMidiOutputId(null)
+        setMidiOutputState('unavailable')
+      })
+  }, [])
 
   const applyKeyboardOctave = useCallback((
     octaveLevel: number,
@@ -1232,7 +1287,10 @@ function App() {
           releaseAll()
           keyboardOctaveLevelRef.current = nextOctaveLevel
           setKeyboardOctaveLevel(nextOctaveLevel)
-          void transport?.prepareKeyboardOctave(nextOctaveLevel)
+          void transport?.prepareKeyboardOctave(
+            nextOctaveLevel,
+            transposeSemitones,
+          )
         }
 
         return
@@ -1255,13 +1313,20 @@ function App() {
           releaseAll()
           keyboardOctaveLevelRef.current = octaveLevel
           setKeyboardOctaveLevel(octaveLevel)
-          void transport?.prepareKeyboardOctave(octaveLevel)
+          void transport?.prepareKeyboardOctave(
+            octaveLevel,
+            transposeSemitones,
+          )
         }
 
         return
       }
 
-      const pitch = keyboardPitchForCode(event.code, activeOctaveLevel)
+      const pitch = keyboardPitchForCode(
+        event.code,
+        activeOctaveLevel,
+        transposeSemitones,
+      )
 
       if (pitch === undefined) {
         return
@@ -1314,7 +1379,7 @@ function App() {
               velocity: 0.93,
               useFullPiano: true,
             }
-          : undefined,
+          : { transposeSemitones },
       )
       advancePractice()
     }
@@ -1323,6 +1388,7 @@ function App() {
       const pitch = keyboardPitchForCode(
         event.code,
         keyboardOctaveLevelRef.current,
+        transposeSemitones,
       )
 
       if (pitch === undefined) {
@@ -1372,7 +1438,14 @@ function App() {
       heldKeyboardPitchesRef.current.clear()
       practiceMatchedPitchesRef.current.clear()
     }
-  }, [advancePractice, isPlaying, isPreparing, keyboardOctaveLevel, midi])
+  }, [
+    advancePractice,
+    isPlaying,
+    isPreparing,
+    keyboardOctaveLevel,
+    midi,
+    transposeSemitones,
+  ])
 
   useEffect(() => {
     const handleGoldInkToggle = (event: KeyboardEvent) => {
@@ -2299,6 +2372,10 @@ function App() {
 
       transport?.load(nextMidi.notes, nextMidi.duration, visibleTracks)
       transport?.preloadCurrentSound()
+      void transport?.prepareKeyboardOctave(
+        keyboardOctaveLevelRef.current,
+        nextTranspose,
+      )
       transport?.seek(nextTime)
 
       if (isPlaying) {
@@ -2504,6 +2581,7 @@ function App() {
             liquidScoreMode={liquidScoreModeActive}
             highlightedPitches={pressedKeyboardPitches}
             keyboardOctaveLevel={keyboardOctaveLevel}
+            transposeSemitones={transposeSemitones}
             pressedKeyboardCodes={
               isDemonstration
                 ? demonstrationPressedKeyboardCodes
@@ -2546,6 +2624,9 @@ function App() {
             playbackRate={playbackRate}
             volume={volume}
             transposeSemitones={transposeSemitones}
+            midiOutputPorts={midiOutputPorts}
+            midiOutputId={midiOutputId}
+            midiOutputState={midiOutputState}
             motifTraceEnabled={motifTraceEnabled}
             motifOccurrenceCount={motifOccurrenceCount}
             symmetryAvailable={sourceKind === 'midi'}
@@ -2566,6 +2647,8 @@ function App() {
             onPlaybackRateChange={handlePlaybackRateChange}
             onVolumeChange={setVolume}
             onTransposeChange={handleTransposeChange}
+            onRequestMidiOutputs={requestMidiOutputPorts}
+            onMidiOutputChange={handleMidiOutputChange}
             onToggleMotifTrace={() =>
               setMotifTraceEnabled((enabled) => !enabled)
             }

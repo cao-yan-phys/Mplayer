@@ -164,9 +164,9 @@ export class GoldMeteorRenderer {
       const tailSprite = this.getTailSprite(variation)
       const velocity = this.normalizeVelocity(note.velocity)
       const burnoutProgress = clamp(
-        0.56 + variation * 0.09 + velocity * 0.02,
-        0.42,
-        0.7,
+        1.17 + variation * 0.08 + velocity * 0.1,
+        1.04,
+        1.35,
       )
       const terminalAge = lifetime * burnoutProgress
       const wakeLifetime = clamp(

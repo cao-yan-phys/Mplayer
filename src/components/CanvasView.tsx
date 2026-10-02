@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { X } from 'lucide-react'
 import type { MotifGroup } from '../midi/motifAnalysis'
 import type { SubjectTrace } from '../midi/contrapunctusSubjects'
 import type { ParsedMidi } from '../midi/noteTypes'
@@ -7,7 +8,11 @@ import { drawVisualizationFrame } from '../visual/drawFrame'
 import { GoldMeteorRenderer } from '../visual/goldMeteorRenderer'
 import { getInkCoordinates } from '../visual/inkRenderer'
 import { LiquidScoreRenderer } from '../visual/liquidRenderer'
-import { renderClefRail } from '../visual/clefRenderer'
+import {
+  getBassClefHitArea,
+  getTrebleClefHitArea,
+  renderClefRail,
+} from '../visual/clefRenderer'
 import { KeyboardIndex } from './KeyboardIndex'
 
 interface CanvasViewProps {
@@ -29,6 +34,7 @@ interface CanvasViewProps {
   liquidScoreMode: boolean
   highlightedPitches: ReadonlySet<number>
   keyboardOctaveLevel: number
+  transposeSemitones: number
   pressedKeyboardCodes: ReadonlySet<string>
   keyboardIndexVisible: boolean
   keyName: string | null
@@ -44,6 +50,8 @@ interface RailSize {
   width: number
   height: number
 }
+
+type ClefPanelPage = 'notes' | 'links'
 
 const emptySize: CanvasSize = {
   width: 0,
@@ -85,6 +93,7 @@ export function CanvasView({
   liquidScoreMode,
   highlightedPitches,
   keyboardOctaveLevel,
+  transposeSemitones,
   pressedKeyboardCodes,
   keyboardIndexVisible,
   keyName,
@@ -98,10 +107,74 @@ export function CanvasView({
   const [railSize, setRailSize] = useState<RailSize>(emptyRailSize)
   const [clefFontReady, setClefFontReady] = useState(false)
   const [goldSkyVersion, setGoldSkyVersion] = useState(0)
+  const [clefPanelOpen, setClefPanelOpen] = useState(false)
+  const [clefPanelPage, setClefPanelPage] = useState<ClefPanelPage>('notes')
   const hasStartedOverviewRef = useRef(false)
   const goldMeteorRendererRef = useRef(new GoldMeteorRenderer())
   const liquidScoreRendererRef = useRef(new LiquidScoreRenderer())
   const stationaryTime = isAnimating ? null : currentTime
+  const bassClefHitArea = useMemo(() => {
+    if (
+      goldInkMode ||
+      liquidScoreMode ||
+      !midi ||
+      !clefFontReady ||
+      !showStaffLines ||
+      railSize.width <= 0 ||
+      size.width <= 0 ||
+      size.height <= 0
+    ) {
+      return null
+    }
+
+    const waveformHeight = midi.gwWaveform
+      ? clamp(size.height * 0.24, 96, 158)
+      : 0
+    const inkHeight = Math.max(1, size.height - waveformHeight)
+    const coordinates = getInkCoordinates({
+      width: size.width,
+      height: inkHeight,
+      notes: midi.notes,
+      duration: midi.duration,
+      currentTime: 0,
+    })
+    const ctx = clefCanvasRef.current?.getContext('2d')
+
+    return ctx
+      ? getBassClefHitArea(ctx, railSize.width, inkHeight, coordinates)
+      : null
+  }, [clefFontReady, goldInkMode, liquidScoreMode, midi, railSize.width, showStaffLines, size.height, size.width])
+  const trebleClefHitArea = useMemo(() => {
+    if (
+      goldInkMode ||
+      liquidScoreMode ||
+      !midi ||
+      !clefFontReady ||
+      !showStaffLines ||
+      railSize.width <= 0 ||
+      size.width <= 0 ||
+      size.height <= 0
+    ) {
+      return null
+    }
+
+    const waveformHeight = midi.gwWaveform
+      ? clamp(size.height * 0.24, 96, 158)
+      : 0
+    const inkHeight = Math.max(1, size.height - waveformHeight)
+    const coordinates = getInkCoordinates({
+      width: size.width,
+      height: inkHeight,
+      notes: midi.notes,
+      duration: midi.duration,
+      currentTime: 0,
+    })
+    const ctx = clefCanvasRef.current?.getContext('2d')
+
+    return ctx
+      ? getTrebleClefHitArea(ctx, railSize.width, inkHeight, coordinates)
+      : null
+  }, [clefFontReady, goldInkMode, liquidScoreMode, midi, railSize.width, showStaffLines, size.height, size.width])
 
   useEffect(() => {
     goldMeteorRendererRef.current.preloadSky(() => {
@@ -438,18 +511,113 @@ export function CanvasView({
 
   return (
     <div className="visual-stage">
-      <aside className="clef-rail" ref={railRef} aria-hidden="true">
+      <aside className="clef-rail" ref={railRef}>
         <canvas ref={clefCanvasRef} />
+        {trebleClefHitArea ? (
+          <button
+            className="treble-clef-link"
+            type="button"
+            aria-label="Open notes"
+            title="Open notes"
+            style={trebleClefHitArea}
+            onClick={() => {
+              setClefPanelPage('notes')
+              setClefPanelOpen(true)
+            }}
+          />
+        ) : null}
+        {bassClefHitArea ? (
+          <button
+            className="bass-clef-link"
+            type="button"
+            aria-label="View repository"
+            title="View repository"
+            style={bassClefHitArea}
+            onClick={() => {
+              window.open(
+                'https://github.com/cao-yan-phys/Mplayer',
+                '_blank',
+                'noopener,noreferrer',
+              )
+            }}
+          />
+        ) : null}
       </aside>
       {keyboardIndexVisible ? (
         <KeyboardIndex
           octaveLevel={keyboardOctaveLevel}
+          transposeSemitones={transposeSemitones}
           pressedCodes={pressedKeyboardCodes}
         />
       ) : null}
       <div className="canvas-frame" ref={frameRef}>
         <canvas ref={canvasRef} />
       </div>
+      {clefPanelOpen ? (
+        <section
+          className="clef-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Notes"
+        >
+          <div className="clef-panel__header">
+            <div className="clef-panel__tabs" role="tablist" aria-label="Panel">
+              <button
+                className={clefPanelPage === 'notes' ? 'is-active' : undefined}
+                type="button"
+                role="tab"
+                aria-selected={clefPanelPage === 'notes'}
+                onClick={() => setClefPanelPage('notes')}
+              >
+                Notes
+              </button>
+              <button
+                className={clefPanelPage === 'links' ? 'is-active' : undefined}
+                type="button"
+                role="tab"
+                aria-selected={clefPanelPage === 'links'}
+                onClick={() => setClefPanelPage('links')}
+              >
+                Links
+              </button>
+            </div>
+            <button
+              className="icon-button compact-button clef-panel__close"
+              type="button"
+              aria-label="Close"
+              title="Close"
+              onClick={() => setClefPanelOpen(false)}
+            >
+              <X size={15} />
+            </button>
+          </div>
+          {clefPanelPage === 'notes' ? (
+            <dl className="clef-panel__notes">
+              <div>
+                <dt>1-5</dt>
+                <dd>Keyboard octave level</dd>
+              </div>
+              <div>
+                <dt>9, 0</dt>
+                <dd>Visualizations</dd>
+              </div>
+              <div>
+                <dt>Backspace</dt>
+                <dd>Play / pause</dd>
+              </div>
+              <div>
+                <dt>MIDI instruments</dt>
+                <dd>
+                  Virtual Piano or Dot Piano can be used through a virtual
+                  MIDI port, e.g., loopMIDI.
+                </dd>
+              </div>
+            </dl>
+          ) : (
+            <div className="clef-panel__links" />
+          )}
+        </section>
+      ) : null}
     </div>
   )
 }

@@ -11,6 +11,7 @@ import {
   Pause,
   Play,
   Plus,
+  Plug,
   RotateCcw,
   ScanSearch,
   Square,
@@ -28,6 +29,7 @@ import {
   type PlaybackRate,
   type SoundPreset,
 } from '../playback/transport'
+import type { MidiOutputPort } from '../playback/midiOutput'
 
 interface ControlsProps {
   disabled: boolean
@@ -50,6 +52,9 @@ interface ControlsProps {
   playbackRate: PlaybackRate
   volume: number
   transposeSemitones: number
+  midiOutputPorts: readonly MidiOutputPort[]
+  midiOutputId: string | null
+  midiOutputState: 'idle' | 'loading' | 'ready' | 'unavailable'
   motifTraceEnabled: boolean
   motifOccurrenceCount: number
   symmetryAvailable: boolean
@@ -70,6 +75,8 @@ interface ControlsProps {
   onPlaybackRateChange: (playbackRate: PlaybackRate) => void
   onVolumeChange: (volume: number) => void
   onTransposeChange: (semitones: number) => void
+  onRequestMidiOutputs: () => void
+  onMidiOutputChange: (id: string | null) => void
   onToggleMotifTrace: () => void
   onToggleAxisSymmetry: () => void
   onToggleCenterSymmetry: () => void
@@ -136,6 +143,9 @@ export function Controls({
   playbackRate,
   volume,
   transposeSemitones,
+  midiOutputPorts,
+  midiOutputId,
+  midiOutputState,
   motifTraceEnabled,
   motifOccurrenceCount,
   symmetryAvailable,
@@ -156,6 +166,8 @@ export function Controls({
   onPlaybackRateChange,
   onVolumeChange,
   onTransposeChange,
+  onRequestMidiOutputs,
+  onMidiOutputChange,
   onToggleMotifTrace,
   onToggleAxisSymmetry,
   onToggleCenterSymmetry,
@@ -169,8 +181,23 @@ export function Controls({
   const practiceIsPlaying = practiceActive && practiceRateLocked
   const transportIsPlaying = isPlaying || practiceIsPlaying
   const [seekPreviewTime, setSeekPreviewTime] = useState<number | null>(null)
+  const [midiOutputMenuOpen, setMidiOutputMenuOpen] = useState(false)
   const isSeekingRef = useRef(false)
   const progressTime = seekPreviewTime ?? Math.min(currentTime, duration)
+  const selectedMidiOutput = midiOutputPorts.find(
+    (port) => port.id === midiOutputId,
+  )
+  const midiOutputDisabled = isPlaying || isPreparing || practiceActive
+
+  const toggleMidiOutputMenu = () => {
+    const nextOpen = !midiOutputMenuOpen
+
+    setMidiOutputMenuOpen(nextOpen)
+
+    if (nextOpen && midiOutputState !== 'loading') {
+      onRequestMidiOutputs()
+    }
+  }
 
   const beginSeek = () => {
     if (isSeekingRef.current) {
@@ -255,16 +282,85 @@ export function Controls({
             value={soundPreset}
             disabled={controlsLocked}
             aria-label="Sound preset"
-            onChange={(event) =>
+            onChange={(event) => {
+              const externalPianoUrl =
+                event.currentTarget.value === 'virtualPiano'
+                  ? 'https://virtualpiano.net/'
+                  : event.currentTarget.value === 'dotPiano'
+                    ? 'https://dotpiano.com/'
+                    : null
+
+              if (externalPianoUrl) {
+                window.open(externalPianoUrl, '_blank', 'noopener,noreferrer')
+                event.currentTarget.value = soundPreset
+                return
+              }
+
               onSoundPresetChange(event.currentTarget.value as SoundPreset)
-            }
+            }}
           >
             <option value="grandPiano">Grand Piano</option>
-            <option value="harmonicPiano">Small Piano</option>
-            <option value="ocarina">Ocarina</option>
             <option value="musicBox">Music Box</option>
+            <option value="virtualPiano">Virtual Piano</option>
+            <option value="dotPiano">Dot Piano</option>
           </select>
           <ChevronDown className="sound-select-arrow" size={15} aria-hidden="true" />
+        </div>
+        <div className="midi-output-wrap">
+          <button
+            className={
+              midiOutputId ? 'icon-button midi-output-toggle is-active' : 'icon-button midi-output-toggle'
+            }
+            type="button"
+            disabled={midiOutputDisabled}
+            title={
+              midiOutputDisabled
+                ? 'Pause playback to change MIDI output'
+                : selectedMidiOutput
+                  ? `MIDI output: ${selectedMidiOutput.name}`
+                  : 'MIDI output'
+            }
+            aria-label="MIDI output"
+            aria-expanded={midiOutputMenuOpen}
+            onClick={toggleMidiOutputMenu}
+          >
+            <Plug size={16} />
+          </button>
+          {midiOutputMenuOpen ? (
+            <div className="midi-output-menu" role="menu" aria-label="MIDI output">
+              <button
+                className={!midiOutputId ? 'is-selected' : undefined}
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  onMidiOutputChange(null)
+                  setMidiOutputMenuOpen(false)
+                }}
+              >
+                Local only
+              </button>
+              {midiOutputState === 'loading' ? (
+                <span className="midi-output-menu__status">Scanning...</span>
+              ) : midiOutputPorts.length > 0 ? (
+                midiOutputPorts.map((port) => (
+                  <button
+                    className={port.id === midiOutputId ? 'is-selected' : undefined}
+                    type="button"
+                    role="menuitem"
+                    key={port.id}
+                    onClick={() => {
+                      onMidiOutputChange(port.id)
+                      setMidiOutputMenuOpen(false)
+                    }}
+                  >
+                    {port.name}
+                  </button>
+                ))
+              ) : midiOutputState === 'unavailable' ? (
+                <span className="midi-output-menu__status">MIDI unavailable</span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         <select
           className="speed-select"
@@ -324,19 +420,6 @@ export function Controls({
           >
             <Minus size={14} />
           </button>
-          <input
-            className="transpose-range"
-            type="range"
-            min={MIN_TRANSPOSE}
-            max={MAX_TRANSPOSE}
-            step={1}
-            value={transposeSemitones}
-            disabled={controlsLocked}
-            aria-label="Transpose semitones"
-            onChange={(event) =>
-              onTransposeChange(Number(event.currentTarget.value))
-            }
-          />
           <span className="transpose-readout">
             {formatTranspose(transposeSemitones)}
           </span>
