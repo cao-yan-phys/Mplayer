@@ -14,6 +14,7 @@ import {
   renderClefRail,
 } from '../visual/clefRenderer'
 import { KeyboardIndex } from './KeyboardIndex'
+import { GwMassRing } from './GwMassRing'
 
 interface CanvasViewProps {
   midi: ParsedMidi | null
@@ -513,6 +514,20 @@ export function CanvasView({
     <div className="visual-stage">
       <aside className="clef-rail" ref={railRef}>
         <canvas ref={clefCanvasRef} />
+        {midi?.gwWaveform && !goldInkMode && !liquidScoreMode ? (
+          <GwMassRing
+            waveform={midi.gwWaveform}
+            duration={midi.duration}
+            width={railSize.width}
+            height={railSize.height}
+            waveformHeight={clamp(size.height * 0.24, 96, 158)}
+            centerX={bassClefHitArea ? bassClefHitArea.left + bassClefHitArea.width / 2 : railSize.width / 2}
+            visibleTracks={visibleTracks}
+            currentTime={currentTime}
+            isAnimating={isAnimating}
+            getCurrentTime={getCurrentTime}
+          />
+        ) : null}
         {trebleClefHitArea ? (
           <button
             className="treble-clef-link"
@@ -606,15 +621,20 @@ export function CanvasView({
                 <dd>Play / pause</dd>
               </div>
               <div>
-                <dt>MIDI instruments</dt>
+                <dt>Instruments</dt>
                 <dd>
                   Virtual Piano or Dot Piano can be used through a virtual
-                  MIDI port, e.g., loopMIDI.
+                  MIDI port, e.g., loopMIDI. Keep this page in the foreground
+                  during playback.
                 </dd>
               </div>
             </dl>
           ) : (
-            <div className="clef-panel__links" />
+            <div className="clef-panel__links" style={{ padding: '16px 20px' }}>
+              <a href={`${import.meta.env.BASE_URL}music-fundamentals/index.html`} target="_blank" rel="noopener noreferrer">
+                Tonal music fundamentals
+              </a>
+            </div>
           )}
         </section>
       ) : null}
